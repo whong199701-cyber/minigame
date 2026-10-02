@@ -1,0 +1,95 @@
+/* Mahjong Solitaire — all classes prefixed with .mj- */
+.mj-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.mj-area canvas {
+  touch-action: none;
+}
+.mj-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.mj-stats {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1;
+}
+.mj-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 44px;
+}
+.mj-stat-label {
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.mj-stat-value {
+  font-size: 17px;
+  line-height: 1.25;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.mj-stat-value.mj-warn {
+  color: var(--danger);
+}
+.mj-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.mj-actions .btn {
+  min-height: 44px;
+  padding: 6px 12px;
+}
+.mj-option {
+  width: 100%;
+  max-width: 320px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.mj-option .row {
+  padding: 8px 6px;
+}
+.mj-legend {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+.mj-legend span {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.mj-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mj-result .mj-big {
+  font-size: 30px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  margin: 2px 0 4px;
+}

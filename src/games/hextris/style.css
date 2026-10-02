@@ -1,0 +1,69 @@
+/* Hex Stack — all classes prefixed with .hx- */
+.hx-icon {
+  color: var(--accent);
+  filter: drop-shadow(0 6px 14px color-mix(in srgb, var(--accent) 45%, transparent));
+}
+.hx-desc {
+  max-width: 320px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.hx-mode-desc {
+  min-height: 18px;
+}
+.hx-hint {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.hx-hud {
+  padding: 6px 14px 2px;
+}
+.hx-hud .stat-value {
+  font-variant-numeric: tabular-nums;
+}
+.hx-hud .hx-score {
+  color: var(--accent);
+}
+.hx-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.hx-overlay {
+  cursor: pointer;
+  gap: 8px;
+}
+.hx-overlay[hidden] {
+  display: none;
+}
+.hx-overlay-icon {
+  font-size: 54px;
+  line-height: 1;
+  color: var(--accent);
+}
+.hx-overlay h2 {
+  font-size: 24px;
+}
+.hx-overlay p {
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 300px;
+}
+.hx-result {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hx-result-score {
+  font-size: 38px;
+  font-weight: 800;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.hx-result-best {
+  color: var(--warning);
+  font-weight: 700;
+}

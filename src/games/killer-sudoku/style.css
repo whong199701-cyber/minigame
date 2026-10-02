@@ -1,0 +1,456 @@
+/* Killer Sudoku — all classes prefixed with .ks- */
+
+.ks-game {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  --ks-line-strong: color-mix(in srgb, var(--text) 70%, transparent);
+  --ks-cage-color: color-mix(in srgb, var(--text) 62%, transparent);
+}
+
+/* ── Start screen extras ─────────────────────────────────────────────── */
+.ks-desc {
+  max-width: 320px;
+}
+.ks-start-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: stretch;
+  width: min(100%, 280px);
+}
+.ks-start-actions .btn {
+  width: 100%;
+}
+.ks-gen-icon {
+  font-size: 56px;
+  line-height: 1;
+  animation: ks-spin 1.2s ease-in-out infinite;
+}
+@keyframes ks-spin {
+  0% {
+    transform: rotate(0deg) scale(1);
+  }
+  50% {
+    transform: rotate(180deg) scale(1.12);
+  }
+  100% {
+    transform: rotate(360deg) scale(1);
+  }
+}
+
+/* ── HUD ─────────────────────────────────────────────────────────────── */
+.ks-hud {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 6px 12px 2px;
+  font-variant-numeric: tabular-nums;
+}
+.ks-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 70px;
+}
+.ks-stat-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ks-stat-value {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+/* ── Board ───────────────────────────────────────────────────────────── */
+.ks-board-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+}
+.ks-board {
+  --ks-size: 270px;
+  --ks-cell: calc(var(--ks-size) / 9);
+  width: var(--ks-size);
+  height: var(--ks-size);
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  grid-template-rows: repeat(9, 1fr);
+  background: var(--surface);
+  border: 2px solid var(--ks-line-strong);
+  border-radius: 6px;
+  overflow: hidden;
+  touch-action: manipulation;
+  flex: none;
+}
+.ks-cell {
+  position: relative;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  min-width: 0;
+  min-height: 0;
+}
+.ks-cell.ks-br {
+  border-right: 2px solid var(--ks-line-strong);
+}
+.ks-cell.ks-bb {
+  border-bottom: 2px solid var(--ks-line-strong);
+}
+.ks-cell:nth-child(9n) {
+  border-right: none;
+}
+.ks-cell:nth-child(n + 73) {
+  border-bottom: none;
+}
+.ks-cage {
+  position: absolute;
+  inset: 0;
+  border: 0 dashed var(--ks-cage-color);
+  pointer-events: none;
+}
+.ks-ct .ks-cage {
+  top: 3px;
+  border-top-width: 1.5px;
+}
+.ks-cr .ks-cage {
+  right: 3px;
+  border-right-width: 1.5px;
+}
+.ks-cb .ks-cage {
+  bottom: 3px;
+  border-bottom-width: 1.5px;
+}
+.ks-cl .ks-cage {
+  left: 3px;
+  border-left-width: 1.5px;
+}
+
+.ks-cell.ks-peer {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.ks-cell.ks-cage-hl {
+  background: color-mix(in srgb, var(--accent-2) 16%, transparent);
+}
+.ks-cell.ks-same {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.ks-cell.ks-sel {
+  background: color-mix(in srgb, var(--accent) 36%, transparent);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  z-index: 1;
+}
+.ks-cell.ks-conflict {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+.ks-cell.ks-conflict.ks-sel {
+  box-shadow: inset 0 0 0 2px var(--danger);
+}
+.ks-cell.ks-wrong {
+  background: color-mix(in srgb, var(--danger) 38%, transparent);
+  animation: ks-shake 0.35s ease;
+}
+@keyframes ks-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-3px);
+  }
+  75% {
+    transform: translateX(3px);
+  }
+}
+
+.ks-val {
+  font-size: calc(var(--ks-cell) * 0.52);
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+  top: calc(var(--ks-cell) * 0.04);
+}
+.ks-given .ks-val {
+  color: var(--text);
+  font-weight: 800;
+}
+.ks-conflict .ks-val {
+  color: var(--danger);
+}
+.ks-pop .ks-val {
+  animation: ks-pop 0.2s ease-out;
+}
+@keyframes ks-pop {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.2;
+  }
+  60% {
+    transform: scale(1.25);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.ks-sum {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: calc(var(--ks-cell) * 0.27);
+  font-weight: 700;
+  color: var(--muted);
+  line-height: 1;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.ks-sum.ks-sum-ok {
+  color: var(--success);
+}
+.ks-sum.ks-sum-bad {
+  color: var(--danger);
+}
+
+.ks-notes {
+  position: absolute;
+  inset: 24% 5% 5% 5%;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  pointer-events: none;
+}
+.ks-note {
+  font-size: calc(var(--ks-cell) * 0.23);
+  color: var(--muted);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  visibility: hidden;
+}
+.ks-note.on {
+  visibility: visible;
+}
+.ks-sel .ks-note {
+  color: var(--text);
+}
+
+/* Win wave */
+.ks-board.ks-won .ks-cell {
+  animation: ks-wave 0.8s ease-in-out both;
+}
+.ks-board.ks-won .ks-val {
+  color: var(--success);
+}
+@keyframes ks-wave {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.15);
+    background: color-mix(in srgb, var(--success) 50%, transparent);
+  }
+  100% {
+    transform: scale(1);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+  }
+}
+
+/* ── Cage helper bar ─────────────────────────────────────────────────── */
+.ks-helper {
+  flex: none;
+  min-height: 56px;
+  padding: 2px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+}
+.ks-helper-main {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+.ks-helper-main.muted {
+  color: var(--muted);
+  font-weight: 500;
+}
+.ks-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+  max-height: 24px;
+  overflow: hidden;
+}
+.ks-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+.ks-chip.ks-chip-more {
+  color: var(--muted);
+  letter-spacing: 0;
+}
+
+/* ── Keypad ──────────────────────────────────────────────────────────── */
+.ks-pad {
+  flex: none;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 4px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ks-digits {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.ks-key {
+  height: 50px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  transition: transform 0.08s ease, background 0.12s ease, color 0.12s ease;
+}
+.ks-key:active {
+  transform: scale(0.94);
+  background: var(--surface-2);
+}
+.ks-key-d {
+  font-size: 22px;
+  font-weight: 700;
+}
+.ks-key-c {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.ks-key.ks-done {
+  opacity: 0.35;
+}
+.ks-key:disabled {
+  cursor: default;
+}
+.ks-key.ks-erase .ks-key-d {
+  font-size: 20px;
+}
+.ks-pad.ks-notes-mode .ks-key:not(.ks-erase) {
+  border-style: dashed;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ks-pad.ks-notes-mode .ks-key:not(.ks-erase) .ks-key-d {
+  font-size: 18px;
+}
+.ks-tools {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.ks-tool {
+  height: 46px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  transition: transform 0.08s ease, background 0.12s ease;
+}
+.ks-tool:active {
+  transform: scale(0.95);
+}
+.ks-tool-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+.ks-tool.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+.ks-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ks-newbest {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+/* ── Landscape phones: board left, controls right ────────────────────── */
+@media (orientation: landscape) and (max-height: 600px) {
+  .ks-game {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(250px, 330px);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      'board hud'
+      'board helper'
+      'board pad';
+  }
+  .ks-hud {
+    grid-area: hud;
+  }
+  .ks-board-wrap {
+    grid-area: board;
+  }
+  .ks-helper {
+    grid-area: helper;
+  }
+  .ks-pad {
+    grid-area: pad;
+    padding-right: 14px;
+  }
+}

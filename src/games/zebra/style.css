@@ -1,0 +1,485 @@
+/* Logic Grid (zebra) — all classes prefixed with .zb- */
+
+/* category tints (used for row labels and clue references) */
+.zb-c0 {
+  --zb-tint: #f0629c;
+}
+.zb-c1 {
+  --zb-tint: #4f8cff;
+}
+.zb-c2 {
+  --zb-tint: #f2a33a;
+}
+.zb-c3 {
+  --zb-tint: #2fc48a;
+}
+.zb-c4 {
+  --zb-tint: #a37cff;
+}
+
+.zb-desc {
+  color: var(--muted);
+  font-size: 14px;
+  max-width: 300px;
+}
+.zb-best {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── top bar ─────────────────────────────────────────────────────────── */
+.zb-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 14px 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.zb-bar b {
+  color: var(--text);
+  font-weight: 600;
+}
+.zb-bar-hint {
+  opacity: 0.8;
+}
+.zb-filled {
+  font-weight: 600;
+}
+
+/* ── main split (clues above grid; side by side in short landscape) ─── */
+.zb-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.zb-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ── clue list ───────────────────────────────────────────────────────── */
+.zb-clues {
+  padding: 8px 12px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overscroll-behavior: contain;
+}
+.zb-clue {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.08s ease;
+}
+.zb-clue:active {
+  transform: scale(0.985);
+  background: var(--surface-2);
+}
+.zb-clue.done {
+  opacity: 0.4;
+}
+.zb-clue.done .zb-clue-text {
+  text-decoration: line-through;
+}
+.zb-clue-num {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+.zb-clue-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.zb-ref {
+  font-weight: 700;
+  white-space: nowrap;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--zb-tint) 20%, transparent);
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--zb-tint) 45%, transparent);
+}
+
+/* ── grid ────────────────────────────────────────────────────────────── */
+.zb-grid-wrap {
+  flex: none;
+  padding: 4px 10px 2px;
+}
+.zb-grid {
+  --zb-ch: 46px;
+  display: grid;
+  grid-template-rows: 22px;
+  grid-auto-rows: var(--zb-ch);
+  gap: 3px;
+  max-width: 640px;
+  margin: 0 auto;
+}
+.zb-grid.shake {
+  animation: zb-shake 0.4s ease;
+}
+.zb-hcell {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.zb-corner {
+  font-size: 13px;
+}
+.zb-rlabel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--zb-tint) 16%, var(--surface));
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.1;
+  overflow: hidden;
+}
+.zb-rlabel .e {
+  font-size: 16px;
+  line-height: 1;
+}
+.zb-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 0;
+  padding: 0 2px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  -webkit-touch-callout: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.zb-cell:active {
+  background: var(--surface-2);
+}
+.zb-cell.empty::after {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.zb-cell .e {
+  font-size: 17px;
+  line-height: 1;
+}
+.zb-cell .l {
+  font-size: 10px;
+  line-height: 1.1;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zb-cell.noemoji .l {
+  font-size: 12px;
+}
+.zb-cell.locked {
+  border-color: color-mix(in srgb, var(--warning) 65%, var(--border));
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  position: relative;
+}
+.zb-cell.locked::before {
+  content: '🔒';
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  font-size: 8px;
+  line-height: 1;
+  opacity: 0.8;
+}
+.zb-cell.solved {
+  border-color: color-mix(in srgb, var(--success) 60%, var(--border));
+  background: color-mix(in srgb, var(--success) 12%, var(--surface));
+}
+.zb-cell.pop {
+  animation: zb-pop 0.2s ease;
+}
+@keyframes zb-pop {
+  0% {
+    transform: scale(0.75);
+  }
+  60% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes zb-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-7px);
+  }
+  40% {
+    transform: translateX(7px);
+  }
+  60% {
+    transform: translateX(-4px);
+  }
+  80% {
+    transform: translateX(4px);
+  }
+}
+
+/* ── controls ────────────────────────────────────────────────────────── */
+.zb-controls {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  max-width: 660px;
+  width: 100%;
+  margin: 0 auto;
+}
+.zb-controls .btn-primary {
+  flex: 1;
+}
+
+/* ── item picker sheet ───────────────────────────────────────────────── */
+.zb-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, background 0.18s ease;
+}
+.zb-sheet-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.42);
+}
+.zb-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-width: 560px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 18px 18px 0 0;
+  padding: 12px 14px 14px;
+  box-shadow: var(--shadow);
+  transform: translateY(100%);
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.zb-sheet-backdrop.open .zb-sheet {
+  transform: translateY(0);
+}
+.zb-sheet-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+.zb-sheet-close {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.zb-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.zb-opt {
+  min-height: 62px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 4px;
+  cursor: pointer;
+  transition: transform 0.08s ease;
+}
+.zb-opt:active {
+  transform: scale(0.95);
+}
+.zb-opt .e {
+  font-size: 22px;
+  line-height: 1;
+}
+.zb-opt .l {
+  font-size: 12px;
+  font-weight: 600;
+}
+.zb-opt .w {
+  font-size: 10px;
+  color: var(--muted);
+}
+.zb-opt.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.zb-opt.elsewhere {
+  opacity: 0.6;
+}
+.zb-opt:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.zb-sheet-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.zb-sheet-actions .btn {
+  flex: 1;
+}
+
+/* ── result modal bits ───────────────────────────────────────────────── */
+.zb-result-time {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.zb-newbest {
+  color: var(--warning);
+  font-weight: 700;
+  margin-top: 6px;
+}
+
+/* wider screens: give the grid some breathing room */
+@media (min-width: 600px) {
+  .zb-grid {
+    --zb-ch: 56px;
+  }
+  .zb-cell .l {
+    font-size: 12px;
+  }
+}
+
+/* short landscape (phone rotated): clues on the left, grid + controls on the right */
+@media (orientation: landscape) and (max-height: 540px) {
+  .zb-bar-hint {
+    display: none;
+  }
+  .zb-main {
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .zb-clues {
+    flex: 1;
+    padding: 6px 8px 6px 12px;
+  }
+  .zb-side {
+    width: 56%;
+    max-width: 540px;
+    justify-content: flex-end;
+    padding-bottom: 2px;
+  }
+  .zb-grid {
+    --zb-ch: 36px;
+    grid-template-rows: 18px;
+    gap: 2px;
+  }
+  .zb-hcell {
+    height: 18px;
+    font-size: 11px;
+  }
+  .zb-rlabel .e {
+    font-size: 13px;
+  }
+  .zb-rlabel .l {
+    font-size: 8px;
+  }
+  .zb-cell .e {
+    font-size: 14px;
+  }
+  .zb-cell .l,
+  .zb-cell.noemoji .l {
+    font-size: 9px;
+  }
+  .zb-controls {
+    padding: 6px 10px 6px;
+  }
+  .zb-controls .btn {
+    min-height: 40px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+  .zb-options {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .zb-opt {
+    min-height: 52px;
+  }
+  .zb-sheet {
+    padding: 8px 14px 10px;
+  }
+  .zb-sheet-title {
+    margin-bottom: 6px;
+  }
+}

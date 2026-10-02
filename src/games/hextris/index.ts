@@ -1,16 +1,904 @@
-import type { GameModule } from '../../app/types';
-import { el } from '../../app/ui';
+import type { GameContext, GameInstance, GameModule, ThemeName } from '../../app/types';
+import { el, button, segmented, formatTime } from '../../app/ui';
+import { createCanvas, createLoop, onPointer, type CanvasHandle } from '../../app/canvas';
+import { strings } from './strings';
+import {
+  COMBO_WINDOW,
+  MODES,
+  MODE_LIST,
+  SIDES,
+  cellKey,
+  clearScore,
+  comboMultiplier,
+  createSim,
+  fallSpeed,
+  findGroups,
+  isMode,
+  levelFor,
+  nextCombo,
+  overflowSides,
+  pickColor,
+  pickLane,
+  removeCells,
+  spawnDistance,
+  spawnInterval,
+  stepFalling,
+  type Cell,
+  type Landed,
+  type Mode,
+  type SimState,
+} from './logic';
+import './style.css';
 
-/** PLACEHOLDER — replaced by the real implementation of "hextris". */
-const game: GameModule = {
-  strings: {
-    zh: { rules: '该游戏正在开发中。' },
-    en: { rules: 'This game is under construction.' },
-  },
-  create(ctx) {
-    ctx.root.append(el('div', { class: 'center muted', text: '🚧 ' + ctx.t('loading') }));
-    return { destroy() {} };
-  },
+const DEG = Math.PI / 180;
+const TAN30 = Math.tan(Math.PI / 6);
+const COS30 = Math.cos(Math.PI / 6);
+/** Seconds a cleared group flashes before it is removed. */
+const CLEAR_DUR = 0.3;
+/** Exponential easing rate of the visual rotation. */
+const ROT_EASE = 17;
+/** Horizontal drag (CSS px) that turns a tap into a swipe, and per extra step. */
+const SWIPE_START = 22;
+const SWIPE_STEP = 64;
+const LAND_FLASH = 0.22;
+const MAX_PARTICLES = 160;
+
+const PALETTES: Record<ThemeName, string[]> = {
+  dark: ['#ff5c7a', '#ffb13b', '#3ddc97', '#4f8cff', '#c46bff'],
+  light: ['#e32e55', '#f08a00', '#1aa364', '#2f63f5', '#8e3fe0'],
 };
 
+interface Theme {
+  bg: string;
+  surface: string;
+  surface2: string;
+  border: string;
+  text: string;
+  muted: string;
+  accent: string;
+  accent2: string;
+  danger: string;
+  warning: string;
+  blocks: string[];
+}
+
+function readTheme(ctx: GameContext, name: ThemeName): Theme {
+  const v = (n: string, fb: string) => ctx.cssVar(n) || fb;
+  const dark = name === 'dark';
+  return {
+    bg: v('--bg', dark ? '#0f1218' : '#f4f6fb'),
+    surface: v('--surface', dark ? '#1a1f2b' : '#ffffff'),
+    surface2: v('--surface-2', dark ? '#232a39' : '#eef1f7'),
+    border: v('--border', dark ? '#2d3548' : '#dde2ec'),
+    text: v('--text', dark ? '#e8ecf3' : '#171a21'),
+    muted: v('--muted', dark ? '#8b94a7' : '#5c6475'),
+    accent: v('--accent', dark ? '#5b8cff' : '#3366ff'),
+    accent2: v('--accent-2', dark ? '#ff7a59' : '#ff6a3d'),
+    danger: v('--danger', dark ? '#ff5470' : '#e0304f'),
+    warning: v('--warning', dark ? '#ffc857' : '#d9960a'),
+    blocks: PALETTES[name],
+  };
+}
+
+/** '#rrggbb' → 'rgba(r,g,b,a)'; other colour formats fall back to the input. */
+function rgba(hex: string, a: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  max: number;
+  color: string;
+  size: number;
+}
+
+interface FloatText {
+  x: number;
+  y: number;
+  text: string;
+  life: number;
+  max: number;
+  color: string;
+  size: number;
+}
+
+interface Clearing {
+  cells: Map<string, Cell & { color: number }>;
+  t: number;
+}
+
+interface Layout {
+  cx: number;
+  cy: number;
+  /** Apothem of the boundary ring. */
+  R: number;
+  /** Apothem of the central hexagon. */
+  a0: number;
+  /** Radial thickness of one block level. */
+  lvl: number;
+}
+
+type Phase = 'start' | 'ready' | 'playing' | 'paused' | 'over';
+
+interface Drag {
+  x0: number;
+  rotBefore: number;
+  tapDir: number;
+}
+
+function create(ctx: GameContext): GameInstance {
+  const { root, t } = ctx;
+  const savedMode = ctx.storage.get<string>('mode', 'medium');
+  let mode: Mode = isMode(savedMode) ? savedMode : 'medium';
+  let cfg = MODES[mode];
+  let themeName: ThemeName = ctx.theme;
+  let theme = readTheme(ctx, themeName);
+  let phase: Phase = 'start';
+
+  // ── Live game state ───────────────────────────────────────────────────
+  let sim: SimState = createSim();
+  let score = 0;
+  let level = 1;
+  let elapsed = 0;
+  let combo = 0;
+  let lastClearAt = -999;
+  let spawnT = 0;
+  let lastLane = -1;
+  let nextId = 1;
+  let clearing: Clearing | null = null;
+  let visualRot = 0; // degrees
+  let overT = 0;
+  let overSides: number[] = [];
+  let particles: Particle[] = [];
+  let floats: FloatText[] = [];
+  const landFlash = new Map<string, number>();
+  let chevL = 0;
+  let chevR = 0;
+  let lastStatusSec = -1;
+  let lastMoveSound = 0;
+  let drag: Drag | null = null;
+  let overTimer = 0;
+
+  let cv: CanvasHandle | null = null;
+  let loop: ReturnType<typeof createLoop> | null = null;
+  let offPointer: (() => void) | null = null;
+  let overlay: HTMLElement | null = null;
+  let overlayTitle: HTMLElement | null = null;
+  let overlayHint: HTMLElement | null = null;
+  let hudScore: HTMLElement | null = null;
+  let hudLevel: HTMLElement | null = null;
+  let hudBest: HTMLElement | null = null;
+  let L: Layout = { cx: 0, cy: 0, R: 100, a0: 30, lvl: 8 };
+
+  // ── Header / global wiring ────────────────────────────────────────────
+  const removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
+  const removePause = ctx.addHeaderAction({ icon: '⏸', label: t('pause'), onClick: togglePause });
+
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+      if (phase === 'playing') {
+        setRotation(sim.rotation - 1);
+        chevL = 1;
+        e.preventDefault();
+      }
+    } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+      if (phase === 'playing') {
+        setRotation(sim.rotation + 1);
+        chevR = 1;
+        e.preventDefault();
+      }
+    } else if (e.key === ' ' || e.key === 'Enter') {
+      if (phase === 'ready') {
+        begin();
+        e.preventDefault();
+      } else if (phase === 'paused') {
+        resumeGame();
+        e.preventDefault();
+      }
+    } else if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') {
+      if (phase === 'playing') pauseGame();
+    }
+  };
+  window.addEventListener('keydown', onKey);
+
+  ctx.onDestroy(() => {
+    removeRestart();
+    removePause();
+    window.removeEventListener('keydown', onKey);
+    teardownGame();
+  });
+  ctx.onVisibility((visible) => {
+    if (!visible) {
+      if (phase === 'playing') pauseGame();
+      loop?.stop();
+    } else if (cv) {
+      loop?.start();
+    }
+  });
+  ctx.onThemeChange((name) => {
+    themeName = name;
+    theme = readTheme(ctx, name);
+    drawFrame();
+  });
+
+  // ── Start screen ──────────────────────────────────────────────────────
+  function showStart(): void {
+    teardownGame();
+    phase = 'start';
+    root.innerHTML = '';
+    ctx.setStatus('');
+    const modeDesc = el('p', { class: 'muted small hx-mode-desc', text: t(mode + 'Desc') });
+    const bestLine = el('p', { class: 'muted' });
+    const updateBest = () => {
+      const b = ctx.storage.getBest(mode);
+      bestLine.textContent = b === null ? t('noBest') : t('bestLine', { n: b });
+    };
+    updateBest();
+    root.append(
+      el(
+        'div',
+        { class: 'start-screen' },
+        el('div', { class: 'big-icon hx-icon', text: '⬢' }),
+        el('h2', { text: t('chooseDifficulty') }),
+        el('p', { class: 'muted hx-desc', text: t('desc') }),
+        segmented<Mode>(
+          MODE_LIST.map((m) => ({ value: m, label: t(m) })),
+          mode,
+          (m) => {
+            mode = m;
+            cfg = MODES[m];
+            ctx.storage.set('mode', m);
+            modeDesc.textContent = t(m + 'Desc');
+            updateBest();
+          },
+        ),
+        modeDesc,
+        bestLine,
+        button(t('play'), () => startGame(false), { variant: 'primary', size: 'lg' }),
+        el('p', { class: 'muted hx-hint', text: t('controlsHint') }),
+      ),
+    );
+  }
+
+  // ── Game setup / teardown ─────────────────────────────────────────────
+  function teardownGame(): void {
+    loop?.stop();
+    loop = null;
+    offPointer?.();
+    offPointer = null;
+    cv?.destroy();
+    cv = null;
+    clearTimeout(overTimer);
+    overTimer = 0;
+    overlay = overlayTitle = overlayHint = null;
+    hudScore = hudLevel = hudBest = null;
+    drag = null;
+  }
+
+  function resetState(): void {
+    cfg = MODES[mode];
+    sim = createSim();
+    score = 0;
+    level = 1;
+    elapsed = 0;
+    combo = 0;
+    lastClearAt = -999;
+    spawnT = 0.5;
+    lastLane = -1;
+    nextId = 1;
+    clearing = null;
+    visualRot = 0;
+    overT = 0;
+    overSides = [];
+    particles = [];
+    floats = [];
+    landFlash.clear();
+    chevL = chevR = 0;
+    lastStatusSec = -1;
+    drag = null;
+  }
+
+  function startGame(immediate: boolean): void {
+    teardownGame();
+    resetState();
+    root.innerHTML = '';
+
+    hudScore = el('div', { class: 'stat-value hx-score', text: '0' });
+    hudLevel = el('div', { class: 'stat-value', text: '1' });
+    hudBest = el('div', { class: 'stat-value', text: String(ctx.storage.getBest(mode) ?? 0) });
+    const hud = el(
+      'div',
+      { class: 'game-hud hx-hud' },
+      el('div', { class: 'stat' }, el('div', { class: 'stat-label', text: t('score') }), hudScore),
+      el('div', { class: 'stat' }, el('div', { class: 'stat-label', text: t('level') }), hudLevel),
+      el('div', { class: 'stat' }, el('div', { class: 'stat-label', text: t('best') }), hudBest),
+    );
+    const area = el('div', { class: 'game-area hx-area' });
+    overlayTitle = el('h2', { text: t('tapToStart') });
+    overlayHint = el('p', { text: t('controlsHint') });
+    overlay = el('div', { class: 'overlay hx-overlay' }, el('div', { class: 'hx-overlay-icon', text: '⬢' }), overlayTitle, overlayHint);
+    overlay.addEventListener('click', () => {
+      if (phase === 'ready') begin();
+      else if (phase === 'paused') resumeGame();
+    });
+    root.append(hud, area);
+
+    cv = createCanvas(area, (w, h) => {
+      computeLayout(w, h);
+      drawFrame();
+    });
+    area.append(overlay);
+    computeLayout(cv.width, cv.height);
+    offPointer = onPointer(cv.canvas, {
+      down(p) {
+        if (phase !== 'playing' || !cv) return;
+        const tapDir = p.x < cv.width / 2 ? -1 : 1;
+        drag = { x0: p.x, rotBefore: sim.rotation, tapDir };
+        setRotation(sim.rotation + tapDir);
+        if (tapDir < 0) chevL = 1;
+        else chevR = 1;
+      },
+      move(p) {
+        if (!drag || phase !== 'playing') return;
+        const dx = p.x - drag.x0;
+        const adx = Math.abs(dx);
+        const steps = adx < SWIPE_START ? 0 : Math.sign(dx) * (1 + Math.floor((adx - SWIPE_START) / SWIPE_STEP));
+        const desired = drag.rotBefore + (steps === 0 ? drag.tapDir : steps);
+        if (desired !== sim.rotation) {
+          setRotation(desired);
+          if (steps < 0) chevL = 1;
+          else if (steps > 0) chevR = 1;
+        }
+      },
+      up() {
+        drag = null;
+      },
+    });
+    loop = createLoop((dt) => {
+      update(dt);
+      drawFrame();
+    });
+    phase = 'ready';
+    updateHud();
+    updateStatus(true);
+    if (immediate) begin();
+    else showOverlay(t('tapToStart'), t('controlsHint'));
+    loop.start();
+  }
+
+  function computeLayout(w: number, h: number): void {
+    const cy = h * 0.47;
+    const R = Math.max(60, Math.min(w / 2 - 14, (cy - 10) * COS30, (h - 64 - cy) * COS30));
+    const a0 = Math.max(24, R * 0.25);
+    L = { cx: w / 2, cy, R, a0, lvl: (R - a0) / cfg.maxLevels };
+  }
+
+  function showOverlay(title: string, hint: string): void {
+    if (!overlay || !overlayTitle || !overlayHint) return;
+    overlayTitle.textContent = title;
+    overlayHint.textContent = hint;
+    overlay.hidden = false;
+  }
+
+  function hideOverlay(): void {
+    if (overlay) overlay.hidden = true;
+  }
+
+  // ── Phase transitions ─────────────────────────────────────────────────
+  function begin(): void {
+    if (phase !== 'ready') return;
+    phase = 'playing';
+    hideOverlay();
+    ctx.play('swoosh');
+    ctx.haptic('light');
+  }
+
+  function pauseGame(): void {
+    if (phase !== 'playing') return;
+    phase = 'paused';
+    drag = null;
+    showOverlay(t('paused'), t('tapToResume'));
+  }
+
+  function resumeGame(): void {
+    if (phase !== 'paused') return;
+    phase = 'playing';
+    hideOverlay();
+    ctx.play('tap');
+    loop?.start();
+  }
+
+  function togglePause(): void {
+    if (phase === 'playing') pauseGame();
+    else if (phase === 'paused') resumeGame();
+  }
+
+  function onRestart(): void {
+    if (phase === 'start') return;
+    if (phase === 'over' || phase === 'ready') {
+      showStart();
+      return;
+    }
+    if (phase === 'playing') pauseGame();
+    ctx.showModal({
+      title: t('restart'),
+      body: t('quitConfirm'),
+      buttons: [{ label: t('cancel') }, { label: t('confirm'), primary: true, onClick: () => showStart() }],
+    });
+  }
+
+  // ── Simulation ────────────────────────────────────────────────────────
+  function setRotation(r: number): void {
+    if (r === sim.rotation) return;
+    sim.rotation = r;
+    const now = performance.now();
+    if (now - lastMoveSound > 70) {
+      ctx.play('move');
+      lastMoveSound = now;
+    }
+    // A taller stack may now sit under a low block: land it right away.
+    const landed = stepFalling(sim, 0, 0);
+    if (landed.length) onLanded(landed);
+  }
+
+  function spawn(): boolean {
+    const dist = spawnDistance(cfg);
+    const lane = pickLane(sim.falling, dist, lastLane, Math.random);
+    if (lane < 0) return false;
+    const color = pickColor(sim.stacks, cfg.colors, Math.random);
+    sim.falling.push({ id: nextId++, lane, pos: dist, color });
+    lastLane = lane;
+    return true;
+  }
+
+  function update(dt: number): void {
+    if (phase === 'playing') {
+      elapsed += dt;
+      const nl = levelFor(elapsed, score);
+      if (nl !== level) {
+        level = nl;
+        onLevelUp();
+      }
+      spawnT -= dt;
+      if (spawnT <= 0) spawnT = spawn() ? spawnT + spawnInterval(cfg, level) : 0.12;
+      const landed = stepFalling(sim, dt, fallSpeed(cfg, level));
+      if (landed.length) onLanded(landed);
+      if (clearing) {
+        clearing.t += dt;
+        if (clearing.t >= CLEAR_DUR) finishClearing();
+      }
+      updateStatus(false);
+    } else if (phase === 'over') {
+      overT += dt;
+      if (overT > 1.2 && particles.length === 0 && floats.length === 0) loop?.stop();
+    }
+    // Visual easing and effects run in every phase so pauses still look alive.
+    const target = sim.rotation * 60;
+    const diff = target - visualRot;
+    visualRot = Math.abs(diff) < 0.02 ? target : visualRot + diff * (1 - Math.exp(-ROT_EASE * dt));
+    chevL = Math.max(0, chevL - dt * 4);
+    chevR = Math.max(0, chevR - dt * 4);
+    for (const [k, v] of landFlash) {
+      const nv = v - dt;
+      if (nv <= 0) landFlash.delete(k);
+      else landFlash.set(k, nv);
+    }
+    if (particles.length) {
+      const keep: Particle[] = [];
+      for (const p of particles) {
+        p.life -= dt;
+        if (p.life <= 0) continue;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 260 * dt;
+        p.vx *= 1 - 1.5 * dt;
+        keep.push(p);
+      }
+      particles = keep;
+    }
+    if (floats.length) {
+      const keep: FloatText[] = [];
+      for (const f of floats) {
+        f.life -= dt;
+        if (f.life <= 0) continue;
+        f.y -= 28 * dt;
+        keep.push(f);
+      }
+      floats = keep;
+    }
+  }
+
+  function onLevelUp(): void {
+    ctx.play('success');
+    ctx.haptic('light');
+    if (hudLevel) hudLevel.textContent = String(level);
+    floats.push({ x: L.cx, y: L.cy - L.a0 - 10, text: t('levelUp', { n: level }), life: 1.3, max: 1.3, color: theme.accent, size: 18 });
+    updateStatus(true);
+  }
+
+  function onLanded(landed: Landed[]): void {
+    ctx.play('place');
+    for (const l of landed) landFlash.set(cellKey(l.side, l.level), LAND_FLASH);
+    const ignore = clearing ? new Set(clearing.cells.keys()) : undefined;
+    const groups = findGroups(sim.stacks, ignore);
+    if (groups.length) startClearing(groups);
+    else if (!clearing) checkOverflow();
+  }
+
+  function startClearing(groups: Cell[][]): void {
+    combo = nextCombo(combo, elapsed - lastClearAt);
+    lastClearAt = elapsed;
+    if (!clearing) clearing = { cells: new Map(), t: 0 };
+    let total = 0;
+    for (const g of groups) {
+      const pts = clearScore(g.length, combo);
+      total += pts;
+      let sx = 0;
+      let sy = 0;
+      for (const c of g) {
+        clearing.cells.set(cellKey(c.side, c.level), { ...c, color: sim.stacks[c.side][c.level] });
+        const p = cellCentre(c.side, c.level);
+        sx += p.x;
+        sy += p.y;
+      }
+      floats.push({ x: sx / g.length, y: sy / g.length, text: '+' + pts, life: 1, max: 1, color: theme.text, size: g.length >= 5 ? 20 : 16 });
+    }
+    score += total;
+    if (hudScore) hudScore.textContent = String(score);
+    const best = ctx.storage.getBest(mode) ?? 0;
+    if (hudBest && score > best) hudBest.textContent = String(score);
+    ctx.play(combo >= 3 ? 'coin' : 'pop');
+    ctx.haptic(combo >= 3 ? 'medium' : 'light');
+    if (combo >= 2) {
+      floats.push({ x: L.cx, y: L.cy + L.a0 + 18, text: `${t('combo', { n: combo })} ×${comboMultiplier(combo).toFixed(1)}`, life: 1.1, max: 1.1, color: theme.warning, size: 17 });
+    }
+  }
+
+  function finishClearing(): void {
+    if (!clearing) return;
+    const cells = [...clearing.cells.values()];
+    for (const c of cells) {
+      const p = cellCentre(c.side, c.level);
+      const color = theme.blocks[c.color % theme.blocks.length];
+      for (let i = 0; i < 5 && particles.length < MAX_PARTICLES; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const sp = 60 + Math.random() * 120;
+        particles.push({ x: p.x, y: p.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - 40, life: 0.45 + Math.random() * 0.3, max: 0.7, color, size: 3 + Math.random() * 3 });
+      }
+    }
+    sim.stacks = removeCells(sim.stacks, cells);
+    clearing = null;
+    landFlash.clear();
+    const groups = findGroups(sim.stacks);
+    if (groups.length) startClearing(groups);
+    else checkOverflow();
+  }
+
+  function checkOverflow(): void {
+    const over = overflowSides(sim.stacks, cfg.maxLevels);
+    if (over.length) gameOver(over);
+  }
+
+  function gameOver(sides: number[]): void {
+    if (phase === 'over') return;
+    phase = 'over';
+    overT = 0;
+    overSides = sides;
+    drag = null;
+    hideOverlay();
+    ctx.play('lose');
+    ctx.haptic('heavy');
+    floats.push({ x: L.cx, y: L.cy - L.a0 - 14, text: t('overflow'), life: 1.4, max: 1.4, color: theme.danger, size: 22 });
+    const isBest = ctx.storage.recordBest(mode, score, 'higher');
+    const best = ctx.storage.getBest(mode) ?? score;
+    if (hudBest) hudBest.textContent = String(best);
+    updateStatus(true);
+    overTimer = window.setTimeout(() => {
+      overTimer = 0;
+      const body = el(
+        'div',
+        { class: 'hx-result' },
+        el('div', { class: 'hx-result-score', text: String(score) }),
+        el('p', { class: 'muted', text: t('reached', { n: level, t: formatTime(elapsed) }) }),
+        el('p', { class: 'muted', text: t('bestLine', { n: best }) }),
+        isBest && score > 0 ? el('p', { class: 'hx-result-best', text: '🏆 ' + t('newBest') }) : null,
+      );
+      ctx.showModal({
+        title: t('lose'),
+        body,
+        dismissible: false,
+        buttons: [
+          { label: t('home'), onClick: () => ctx.exit() },
+          { label: t('modes'), onClick: () => showStart() },
+          { label: t('retry'), primary: true, onClick: () => startGame(true) },
+        ],
+      });
+    }, 900);
+  }
+
+  function updateHud(): void {
+    if (hudScore) hudScore.textContent = String(score);
+    if (hudLevel) hudLevel.textContent = String(level);
+    if (hudBest) hudBest.textContent = String(Math.max(score, ctx.storage.getBest(mode) ?? 0));
+  }
+
+  function updateStatus(force: boolean): void {
+    const sec = Math.floor(elapsed);
+    if (!force && sec === lastStatusSec) return;
+    lastStatusSec = sec;
+    ctx.setStatus(`${t('level')} ${level} · ${formatTime(elapsed)}`);
+  }
+
+  // ── Geometry helpers ──────────────────────────────────────────────────
+  /** Canvas position of the centre of a stacked cell (uses the eased visual rotation). */
+  function cellCentre(side: number, levelIdx: number): { x: number; y: number } {
+    const ang = (visualRot + side * 60) * DEG;
+    const r = L.a0 + (levelIdx + 0.5) * L.lvl;
+    return { x: L.cx + Math.cos(ang) * r, y: L.cy + Math.sin(ang) * r };
+  }
+
+  /** Trapezoid between apothems a1..a2 in a frame whose +x axis is the side's outward normal. */
+  function trap(c: CanvasRenderingContext2D, a1: number, a2: number, inset: number): void {
+    const i1 = a1 + inset;
+    const i2 = a2 - inset;
+    const s = inset * 1.15;
+    c.beginPath();
+    c.moveTo(i1, -i1 * TAN30 + s);
+    c.lineTo(i2, -i2 * TAN30 + s);
+    c.lineTo(i2, i2 * TAN30 - s);
+    c.lineTo(i1, i1 * TAN30 - s);
+    c.closePath();
+  }
+
+  function hexPath(c: CanvasRenderingContext2D, apothem: number, rotDeg: number): void {
+    const r = apothem / COS30;
+    c.beginPath();
+    for (let k = 0; k < SIDES; k++) {
+      const a = (rotDeg + 30 + k * 60) * DEG;
+      const x = Math.cos(a) * r;
+      const y = Math.sin(a) * r;
+      if (k === 0) c.moveTo(x, y);
+      else c.lineTo(x, y);
+    }
+    c.closePath();
+  }
+
+  // ── Drawing ───────────────────────────────────────────────────────────
+  function drawFrame(): void {
+    if (!cv) return;
+    const c = cv.ctx;
+    const W = cv.width;
+    const H = cv.height;
+    c.setTransform(cv.dpr, 0, 0, cv.dpr, 0, 0);
+    c.fillStyle = theme.bg;
+    c.fillRect(0, 0, W, H);
+
+    c.save();
+    let sx = 0;
+    let sy = 0;
+    if (phase === 'over' && overT < 0.5) {
+      const k = (1 - overT / 0.5) * 7;
+      sx = Math.sin(overT * 90) * k;
+      sy = Math.cos(overT * 70) * k * 0.5;
+    }
+    c.translate(L.cx + sx, L.cy + sy);
+    drawBoard(c);
+    drawStacks(c);
+    drawFalling(c);
+    drawCentre(c);
+    c.restore();
+
+    drawEffects(c);
+    drawCombo(c);
+    drawChevrons(c, W, H);
+  }
+
+  function drawBoard(c: CanvasRenderingContext2D): void {
+    // Play field tint.
+    hexPath(c, L.R, 0);
+    c.fillStyle = rgba(theme.surface, themeName === 'dark' ? 0.55 : 0.9);
+    c.fill();
+    // World-fixed lane dividers.
+    c.strokeStyle = rgba(theme.border, 0.7);
+    c.lineWidth = 1;
+    const r1 = L.a0 / COS30;
+    const r2 = L.R / COS30;
+    c.beginPath();
+    for (let k = 0; k < SIDES; k++) {
+      const a = (30 + k * 60) * DEG;
+      c.moveTo(Math.cos(a) * r1, Math.sin(a) * r1);
+      c.lineTo(Math.cos(a) * r2, Math.sin(a) * r2);
+    }
+    c.stroke();
+    // Boundary ring.
+    hexPath(c, L.R, 0);
+    c.strokeStyle = theme.border;
+    c.lineWidth = 2;
+    c.stroke();
+    // Danger highlight on the ring where a nearly full stack sits.
+    const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 120);
+    for (let s = 0; s < SIDES; s++) {
+      const h = sim.stacks[s].length;
+      if (h < cfg.maxLevels - 1) continue;
+      const over = overSides.includes(s) || h > cfg.maxLevels;
+      const a = (visualRot + s * 60) * DEG;
+      const x1 = Math.cos(a - Math.PI / 6) * r2;
+      const y1 = Math.sin(a - Math.PI / 6) * r2;
+      const x2 = Math.cos(a + Math.PI / 6) * r2;
+      const y2 = Math.sin(a + Math.PI / 6) * r2;
+      c.beginPath();
+      c.moveTo(x1, y1);
+      c.lineTo(x2, y2);
+      c.strokeStyle = rgba(theme.danger, over ? 1 : 0.35 + 0.55 * pulse);
+      c.lineWidth = over ? 5 : 3;
+      c.stroke();
+    }
+  }
+
+  function drawStacks(c: CanvasRenderingContext2D): void {
+    const prog = clearing ? Math.min(1, clearing.t / CLEAR_DUR) : 0;
+    for (let s = 0; s < SIDES; s++) {
+      const col = sim.stacks[s];
+      if (!col.length) continue;
+      c.save();
+      c.rotate((visualRot + s * 60) * DEG);
+      for (let k = 0; k < col.length; k++) {
+        const a1 = L.a0 + k * L.lvl;
+        const a2 = a1 + L.lvl;
+        const key = cellKey(s, k);
+        const color = theme.blocks[col[k] % theme.blocks.length];
+        trap(c, a1, a2, 1);
+        c.fillStyle = color;
+        c.fill();
+        // Outer-edge highlight for depth.
+        c.beginPath();
+        c.moveTo(a2 - 1.5, -(a2 - 1.5) * TAN30 + 2.5);
+        c.lineTo(a2 - 1.5, (a2 - 1.5) * TAN30 - 2.5);
+        c.strokeStyle = 'rgba(255,255,255,0.3)';
+        c.lineWidth = 1.5;
+        c.stroke();
+        if (k >= cfg.maxLevels) {
+          trap(c, a1, a2, 1);
+          c.strokeStyle = theme.danger;
+          c.lineWidth = 2;
+          c.stroke();
+        }
+        if (clearing && clearing.cells.has(key)) {
+          trap(c, a1, a2, 1);
+          c.fillStyle = `rgba(255,255,255,${0.25 + 0.7 * prog})`;
+          c.fill();
+        } else {
+          const f = landFlash.get(key);
+          if (f !== undefined) {
+            trap(c, a1, a2, 1);
+            c.fillStyle = `rgba(255,255,255,${(0.45 * f) / LAND_FLASH})`;
+            c.fill();
+          }
+        }
+      }
+      c.restore();
+    }
+  }
+
+  function drawFalling(c: CanvasRenderingContext2D): void {
+    for (const f of sim.falling) {
+      c.save();
+      c.rotate(f.lane * 60 * DEG);
+      const a1 = L.a0 + f.pos * L.lvl;
+      const a2 = a1 + L.lvl;
+      const color = theme.blocks[f.color % theme.blocks.length];
+      c.globalAlpha = 0.16;
+      trap(c, a2, a2 + L.lvl * 1.7, 1);
+      c.fillStyle = color;
+      c.fill();
+      c.globalAlpha = 1;
+      trap(c, a1, a2, 1);
+      c.fillStyle = color;
+      c.fill();
+      c.beginPath();
+      c.moveTo(a2 - 1.5, -(a2 - 1.5) * TAN30 + 2.5);
+      c.lineTo(a2 - 1.5, (a2 - 1.5) * TAN30 - 2.5);
+      c.strokeStyle = 'rgba(255,255,255,0.3)';
+      c.lineWidth = 1.5;
+      c.stroke();
+      c.restore();
+    }
+  }
+
+  function drawCentre(c: CanvasRenderingContext2D): void {
+    const g = c.createRadialGradient(0, 0, L.a0 * 0.2, 0, 0, L.a0);
+    g.addColorStop(0, theme.surface2);
+    g.addColorStop(1, theme.surface);
+    hexPath(c, L.a0 - 1, visualRot);
+    c.fillStyle = g;
+    c.fill();
+    c.strokeStyle = phase === 'over' ? theme.danger : theme.accent;
+    c.lineWidth = 2.5;
+    c.stroke();
+    hexPath(c, L.a0 * 0.6, visualRot);
+    c.strokeStyle = rgba(theme.accent, 0.35);
+    c.lineWidth = 1;
+    c.stroke();
+    c.fillStyle = theme.muted;
+    c.font = `600 ${Math.max(9, Math.round(L.a0 * 0.22))}px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif`;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText(t('level').toUpperCase(), 0, -L.a0 * 0.22);
+    c.fillStyle = theme.text;
+    c.font = `800 ${Math.round(L.a0 * 0.5)}px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif`;
+    c.fillText(String(level), 0, L.a0 * 0.12);
+  }
+
+  function drawEffects(c: CanvasRenderingContext2D): void {
+    for (const p of particles) {
+      c.globalAlpha = Math.max(0, Math.min(1, p.life / 0.3));
+      c.fillStyle = p.color;
+      c.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+    c.globalAlpha = 1;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    for (const f of floats) {
+      const k = f.life / f.max;
+      c.globalAlpha = k < 0.3 ? k / 0.3 : 1;
+      c.font = `800 ${f.size}px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif`;
+      c.lineWidth = 4;
+      c.strokeStyle = rgba(theme.bg, 0.85);
+      c.strokeText(f.text, f.x, f.y);
+      c.fillStyle = f.color;
+      c.fillText(f.text, f.x, f.y);
+    }
+    c.globalAlpha = 1;
+  }
+
+  function drawCombo(c: CanvasRenderingContext2D): void {
+    if (phase !== 'playing' || combo < 2) return;
+    const since = elapsed - lastClearAt;
+    if (since > COMBO_WINDOW) return;
+    const rem = 1 - since / COMBO_WINDOW;
+    const y = L.cy + L.R / COS30 + 22;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.font = `700 14px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif`;
+    c.fillStyle = theme.warning;
+    c.fillText(`${t('combo', { n: combo })} · ×${comboMultiplier(combo).toFixed(1)}`, L.cx, y);
+    const w = 120;
+    c.fillStyle = rgba(theme.border, 0.8);
+    c.fillRect(L.cx - w / 2, y + 12, w, 4);
+    c.fillStyle = theme.warning;
+    c.fillRect(L.cx - w / 2, y + 12, w * rem, 4);
+  }
+
+  function drawChevrons(c: CanvasRenderingContext2D, W: number, H: number): void {
+    if (phase === 'over') return;
+    const y = H - 34;
+    const tri = (x: number, dir: number, k: number) => {
+      c.beginPath();
+      c.moveTo(x + dir * 11, y);
+      c.lineTo(x - dir * 7, y - 11);
+      c.lineTo(x - dir * 7, y + 11);
+      c.closePath();
+      c.fillStyle = rgba(theme.text, 0.16 + 0.7 * k);
+      c.fill();
+    };
+    tri(38, -1, chevL);
+    tri(W - 38, 1, chevR);
+  }
+
+  showStart();
+  return {
+    destroy() {
+      teardownGame();
+    },
+  };
+}
+
+const game: GameModule = { strings, create };
 export default game;

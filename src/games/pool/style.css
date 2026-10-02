@@ -1,0 +1,53 @@
+/* Pool Clear — all classes prefixed with .pc- */
+.pc-start {
+  gap: 12px;
+}
+.pc-desc {
+  max-width: 320px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.pc-mode-desc {
+  font-size: 14px;
+  margin-top: -2px;
+}
+.pc-par {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.pc-hud {
+  padding: 6px 18px 4px;
+}
+.pc-hud .stat-value {
+  font-size: 20px;
+  line-height: 1.1;
+}
+.pc-area {
+  overflow: hidden;
+}
+.pc-area canvas {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.pc-result {
+  text-align: center;
+}
+.pc-result p {
+  margin: 0 0 6px;
+}
+.pc-stars {
+  font-size: 30px;
+  line-height: 1.1;
+  letter-spacing: 4px;
+  color: var(--warning);
+}
+.pc-result-main {
+  font-size: 18px;
+  font-weight: 700;
+}
+.pc-newbest {
+  font-weight: 700;
+  color: var(--success);
+}
