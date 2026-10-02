@@ -158,7 +158,9 @@ p {
   border-radius: 12px;
   background: transparent;
   color: var(--text);
-  font-size: 20px;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
