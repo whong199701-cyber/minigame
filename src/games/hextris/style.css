@@ -95,3 +95,7 @@
   color: var(--warning);
   font-weight: 700;
 }
+.hx-overlay .hx-overlay-btn {
+  min-height: 44px;
+  margin-top: 6px;
+}

@@ -1,7 +1,22 @@
-/* Circuit Rotate (netwalk) — every class is prefixed with .nw- */
+/* Circuit Rotate (netwalk): every class is prefixed with .nw- */
 
+/* The start screen scrolls when it is taller than the screen. Auto margins on the first and last child centre the
+   content while it fits and collapse to 0 when it does not, so the top never ends up above the scroll origin
+   (unlike justify-content: center). */
 .nw-start {
   gap: 12px;
+  min-height: 0;
+  justify-content: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.nw-start > :first-child {
+  margin-top: auto;
+}
+.nw-start > :last-child {
+  margin-bottom: auto;
 }
 .nw-start .segmented {
   flex-wrap: wrap;
@@ -10,6 +25,7 @@
 .nw-start .seg {
   padding: 6px 11px;
   min-width: 64px;
+  min-height: 44px;
 }
 .nw-tagline {
   max-width: 300px;
@@ -21,29 +37,119 @@
 }
 .nw-best {
   min-height: 18px;
+  max-width: 320px;
   font-variant-numeric: tabular-nums;
 }
+.nw-start-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: min(260px, 100%);
+}
+.nw-start-actions .btn {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+.nw-cont-info {
+  flex-basis: 100%;
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+.nw-game {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: 'hud' 'bar' 'area' 'foot';
+}
 .nw-hud {
-  padding: 6px 14px 2px;
+  grid-area: hud;
+  padding: 6px 14px 4px;
 }
 .nw-hud .stat-value {
   font-size: 17px;
 }
+.nw-hud .stat-value.nw-over {
+  color: var(--warning);
+}
+.nw-progress {
+  grid-area: bar;
+  flex: none;
+  height: 4px;
+  margin: 2px 18px 0;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.nw-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.25s ease, background 0.25s ease;
+}
+.nw-progress-fill.full {
+  background: var(--success);
+}
+
 .nw-area {
-  flex: 1;
+  grid-area: area;
+  min-width: 0;
   min-height: 0;
   position: relative;
+  overflow: hidden;
 }
+.nw-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.nw-fit {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+.nw-fit.show {
+  display: inline-flex;
+}
+.nw-fit:active {
+  transform: scale(0.94);
+}
+
 .nw-footer {
+  grid-area: foot;
   flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 2px 14px 10px;
+  padding: 2px 14px 12px;
 }
 .nw-tip {
   font-size: 12px;
+  text-align: center;
 }
 .nw-buttons {
   display: flex;
@@ -52,20 +158,113 @@
 }
 .nw-buttons .btn {
   min-width: 128px;
+  min-height: 44px;
 }
+
 .nw-result {
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 4px;
+  text-align: center;
+}
+.nw-result p {
+  margin: 0;
+}
+.nw-result-time {
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 2px;
 }
 .nw-result .nw-good {
   color: var(--success);
   font-weight: 600;
 }
-.nw-result .nw-best-line {
+.nw-result .nw-record {
   color: var(--warning);
   font-weight: 600;
+  margin-top: 4px;
 }
-.nw-start .btn-primary {
-  min-width: 160px;
+.nw-result .nw-next {
+  margin-top: 8px;
+  min-height: 44px;
+}
+
+/* Short screens (phones in landscape): a compact start screen so Continue and Play both fit without scrolling. */
+@media (orientation: landscape) and (max-height: 600px) {
+  .nw-start {
+    gap: 6px;
+    padding: 10px 16px;
+  }
+  .nw-start .big-icon {
+    font-size: 34px;
+  }
+  .nw-start h2 {
+    font-size: 18px;
+  }
+  .nw-tagline {
+    display: none;
+  }
+  .nw-desc,
+  .nw-best {
+    margin: 0;
+  }
+  .nw-start-actions {
+    flex-direction: row;
+    justify-content: center;
+    align-items: stretch;
+    width: auto;
+    max-width: 100%;
+  }
+  .nw-start-actions .btn {
+    min-width: 168px;
+  }
+}
+@media (orientation: landscape) and (max-height: 340px) {
+  .nw-start {
+    gap: 4px;
+    padding: 6px 16px;
+  }
+  .nw-start-tip {
+    display: none;
+  }
+}
+/* Small portrait phones (iPhone SE): a little tighter so the buttons and the tip stay on screen. */
+@media (orientation: portrait) and (max-height: 620px) {
+  .nw-start {
+    gap: 8px;
+    padding: 14px 20px;
+  }
+  .nw-start .big-icon {
+    font-size: 48px;
+  }
+}
+
+/* Phones in landscape: stats and buttons move to a side column so the board gets the full height. */
+@media (orientation: landscape) and (max-height: 600px) {
+  .nw-game {
+    grid-template-columns: minmax(210px, 32%) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto auto auto minmax(0, 1fr);
+    grid-template-areas: '. area' 'hud area' 'bar area' 'foot area' '. area';
+  }
+  .nw-hud {
+    padding: 4px 10px;
+  }
+  .nw-progress {
+    margin: 4px 14px 10px;
+  }
+  .nw-footer {
+    padding: 2px 10px 8px;
+  }
+  .nw-buttons {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    max-width: 240px;
+  }
+  .nw-buttons .btn {
+    min-width: 0;
+  }
 }

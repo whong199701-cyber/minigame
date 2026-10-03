@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   CAMPAIGN_LEVELS,
+  CLIFF_SLOPE,
   DT,
+  EXHAUST_REACH,
+  VIEW_H_MIN,
   FEET,
   FOOT_Y,
   HULL,
@@ -9,18 +12,23 @@ import {
   MAX_VX,
   MAX_VY,
   PAD_GAP,
+  PAD_LEVEL_TOL,
   PAD_MARGIN,
+  PAD_TOLERANCE,
   PAD_WIDTHS,
   READY_TIME,
   ROT_SPEED,
   THRUST,
   WORLD_W,
   altitudeAbove,
+  cameraTargetY,
   checkContact,
   createLander,
   createLevel,
   currentWind,
   evaluateLanding,
+  exhaustGroundHit,
+  footOnPad,
   fuelRateFor,
   generateTerrain,
   heightAt,
@@ -29,9 +37,12 @@ import {
   levelScore,
   normalizeAngle,
   optimalBurnTime,
+  overviewZoom,
   padsFor,
   rng,
+  sanitizeRun,
   settle,
+  slopeAt,
   stepLander,
   stepLevel,
   toWorld,
@@ -84,6 +95,14 @@ describe('levelConfig', () => {
       expect(levelConfig(n).wind).toBeGreaterThan(0);
       expect(levelConfig(n).wind).toBeLessThanOrEqual(0.55);
     }
+  });
+
+  it('keeps tightening fuel in endless mode down to a fair floor', () => {
+    for (let n = CAMPAIGN_LEVELS + 1; n <= 60; n++) {
+      expect(levelConfig(n).fuelMargin).toBeLessThanOrEqual(levelConfig(n - 1).fuelMargin);
+      expect(levelConfig(n).fuelMargin).toBeGreaterThanOrEqual(1.4);
+    }
+    expect(levelConfig(CAMPAIGN_LEVELS + 1).fuelMargin).toBeLessThan(levelConfig(CAMPAIGN_LEVELS).fuelMargin);
   });
 
   it('keeps thrust above gravity even in endless mode', () => {
@@ -312,6 +331,162 @@ describe('landing rules', () => {
   });
 });
 
+describe('pad edges (rims and drop-offs)', () => {
+  /** Pad 60–74 at y 20 with a near-vertical 7 m rim on the left and a 3 m drop-off on the right. */
+  const rimmed: Terrain = {
+    width: WORLD_W,
+    points: [
+      { x: 0, y: 27 },
+      { x: 59.99, y: 27 },
+      { x: 60, y: 20 },
+      { x: 74, y: 20 },
+      { x: 74.01, y: 17 },
+      { x: WORLD_W, y: 17 },
+    ],
+    pads: [{ x0: 60, x1: 74, y: 20, mult: 2 }],
+  };
+  const pad = rimmed.pads[0];
+
+  /** Fly a level on `terrain` straight down at about -1.5 m/s from `l` until the flight ends. */
+  function descend(terrain: Terrain, l: Lander): { result: ReturnType<typeof stepLevel>; lv: Level; yBefore: number } {
+    const lv = createLevel(1, 1);
+    lv.terrain = terrain;
+    lv.phase = 'flying';
+    lv.lander = l;
+    let result: ReturnType<typeof stepLevel> = null;
+    let yBefore = l.y;
+    for (let i = 0; i < 60 * 30 && !result; i++) {
+      yBefore = l.y;
+      result = stepLevel(lv, { thrust: l.vy < -1.5, rot: 0 });
+    }
+    return { result, lv, yBefore };
+  }
+
+  it('a foot resting on a raised rim inside the edge slack is not on the pad', () => {
+    const rimFoot = { x: pad.x0 - 0.2, y: 27 };
+    expect(rimFoot.x).toBeGreaterThan(pad.x0 - PAD_TOLERANCE);
+    expect(footOnPad(rimFoot, pad, rimmed)).toBe(false);
+    // a foot in the air above that rim would rest on it once settled, so it does not count either
+    expect(footOnPad({ x: pad.x0 - 0.2, y: 27.5 }, pad, rimmed)).toBe(false);
+    expect(footOnPad({ x: pad.x0 + 1, y: 20 }, pad, rimmed)).toBe(true);
+    expect(footOnPad({ x: pad.x0 + 1, y: 20.9 }, pad, rimmed)).toBe(true); // in the air over the pad (tilted lander)
+  });
+
+  it('touching the rim with one foot while the other is over the pad crashes (offPad) without a teleport', () => {
+    const l = createLander(pad.x0 - 0.2 + 3, 27 - FOOT_Y + 3, 0);
+    l.vy = -1.5;
+    const { result, lv, yBefore } = descend(rimmed, l);
+    expect(result).toBe('crashed');
+    expect(lv.outcome?.kind === 'crashed' && lv.outcome.reasons).toEqual(['offPad']);
+    // it stopped where the foot met the rim, ~7 m above the pad, instead of snapping down onto the pad
+    expect(Math.abs(lv.lander.y - yBefore)).toBeLessThan(0.1);
+    expect(toWorld(lv.lander, FEET[0]).y).toBeGreaterThan(pad.y + 6);
+  });
+
+  it('a foot hanging over a drop-off inside the edge slack still lands', () => {
+    const l = createLander(pad.x1 + 0.2 - 3, 20 - FOOT_Y + 3, 0);
+    l.vy = -1.5;
+    const { result, lv } = descend(rimmed, l);
+    expect(result).toBe('landed');
+    expect(lv.lander.y).toBeCloseTo(pad.y - FOOT_Y, 9);
+  });
+
+  it('a foot that touches the lower ground beside the pad is off the pad', () => {
+    const l = createLander(pad.x1 + 0.25 - 3, 17 - FOOT_Y, 0);
+    l.angle = -0.12; // right foot low: it reaches the lower ground just past the edge before the left one lands
+    const feet = FEET.map((p) => toWorld(l, p));
+    l.y += 17 - feet[1].y - 0.001;
+    l.vy = -1;
+    const c = checkContact(l, rimmed);
+    expect(c.kind).toBe('crashed');
+    expect(c.kind === 'crashed' && c.reasons).toEqual(['offPad']);
+    expect(footOnPad({ x: pad.x1 + 0.25, y: 17 }, pad, rimmed)).toBe(false);
+  });
+
+  it('reproduces the reported rim case on a generated level (createLevel(8, 553))', () => {
+    const lv = createLevel(8, 553);
+    const p = lv.terrain.pads.find((q) => Math.abs(q.x0 - 39.95) < 0.01)!;
+    expect(p).toBeDefined();
+    expect(heightAt(lv.terrain, p.x0 - 0.29) - p.y).toBeGreaterThan(5);
+    const l = createLander(p.x0 - 0.2 + 3, 45, 0);
+    l.vy = -1.5;
+    const { result, lv: flown, yBefore } = descend(lv.terrain, l);
+    expect(result).toBe('crashed');
+    expect(flown.outcome?.kind === 'crashed' && flown.outcome.reasons).toContain('offPad');
+    expect(Math.abs(flown.lander.y - yBefore)).toBeLessThan(0.1);
+  });
+
+  it('generated levels: every landing near a pad edge rests both feet on the pad with no big snap', () => {
+    const problems: string[] = [];
+    let landings = 0;
+    for (let n = 1; n <= 12; n++) {
+      for (let seed = 1; seed <= 8; seed++) {
+        const terrain = createLevel(n, seed * 31 + 7).terrain;
+        for (const p of terrain.pads) {
+          for (const side of [-1, 1]) {
+            for (const off of [-0.29, -0.15, 0, 0.15, 0.29]) {
+              for (const ang of [0, 0.12]) {
+                const xf = side < 0 ? p.x0 + off : p.x1 + off; // the outer foot
+                const l = createLander(xf - side * 3, Math.max(p.y, heightAt(terrain, xf)) + 4, 0);
+                l.vy = -1.5;
+                l.angle = ang * side;
+                const { result, lv, yBefore } = descend(terrain, l);
+                if (result !== 'landed') continue;
+                landings++;
+                const grounds = FEET.map((q) => heightAt(terrain, toWorld(lv.lander, q).x));
+                if (grounds.some((g) => g > p.y + PAD_LEVEL_TOL) || yBefore - lv.lander.y > 0.8) {
+                  problems.push(`level ${n} seed ${seed} side ${side} off ${off} ang ${ang}: drop ${(yBefore - lv.lander.y).toFixed(2)}`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(landings).toBeGreaterThan(200);
+    expect(problems).toEqual([]);
+  });
+});
+
+describe('crash reasons away from the pads', () => {
+  const walled: Terrain = {
+    width: WORLD_W,
+    points: [
+      { x: 0, y: 140 },
+      { x: 10, y: 20 },
+      { x: 60, y: 20 },
+      { x: 82, y: 20 },
+      { x: WORLD_W, y: 20 },
+    ],
+    pads: [{ x0: 60, x1: 82, y: 20, mult: 1 }],
+  };
+
+  it('slopeAt measures local steepness', () => {
+    expect(slopeAt(walled, 5)).toBeCloseTo(12, 6);
+    expect(slopeAt(walled, 30)).toBeCloseTo(0, 9);
+    expect(slopeAt(walled, 0)).toBeCloseTo(12, 6);
+    expect(CLIFF_SLOPE).toBeGreaterThan(0);
+  });
+
+  it('flying sideways into a steep wall reports a cliff, not rough ground', () => {
+    const l = createLander(12, 0, 0);
+    l.angle = 0;
+    const footX = 12 - 3;
+    l.y = heightAt(walled, footX) - FOOT_Y - 0.01; // left foot just inside the wall face
+    l.vx = -4;
+    const c = checkContact(l, walled);
+    expect(c.kind).toBe('crashed');
+    expect(c.kind === 'crashed' && c.reasons).toEqual(['cliff', 'hspeed']);
+  });
+
+  it('touching down on gentle ground away from the pads is still "terrain"', () => {
+    const l = createLander(35, 20 - FOOT_Y - 0.01, 0);
+    l.vy = -1;
+    const c = checkContact(l, walled);
+    expect(c.kind === 'crashed' && c.reasons).toEqual(['terrain']);
+  });
+});
+
 describe('collision', () => {
   const terrain = flatTerrain(20, 60, 1);
 
@@ -452,6 +627,85 @@ describe('level lifecycle', () => {
   });
 });
 
+describe('campaign run persistence', () => {
+  it('accepts a well-formed run and normalises it', () => {
+    expect(sanitizeRun({ level: 4, score: 812, seed: 12345 })).toEqual({ level: 4, score: 812, seed: 12345 });
+    expect(sanitizeRun({ level: 3.9, score: 10.6, seed: -1 })).toEqual({ level: 3, score: 11, seed: 4294967295 });
+    expect(sanitizeRun({ level: 0, score: -5, seed: 1 })).toEqual({ level: 1, score: 0, seed: 1 });
+  });
+  it('rejects malformed data', () => {
+    expect(sanitizeRun(null)).toBeNull();
+    expect(sanitizeRun(undefined)).toBeNull();
+    expect(sanitizeRun('run')).toBeNull();
+    expect(sanitizeRun({ level: '2', score: 0, seed: 1 })).toBeNull();
+    expect(sanitizeRun({ level: 2, score: NaN, seed: 1 })).toBeNull();
+    expect(sanitizeRun({ level: 2, score: 0 })).toBeNull();
+  });
+});
+
+describe('exhaust plume', () => {
+  const terrain = flatTerrain(20, 60, 1);
+  it('hits the ground straight below an upright lander when close', () => {
+    const l = createLander(70, 20 - FOOT_Y + 3, 0);
+    const hit = exhaustGroundHit(l, terrain);
+    expect(hit).not.toBeNull();
+    expect(hit!.x).toBeCloseTo(70, 9);
+    expect(hit!.y).toBe(20);
+    expect(hit!.d).toBeGreaterThan(0);
+    expect(hit!.d).toBeLessThan(5);
+  });
+  it('follows the tilt and is null when the ground is out of reach', () => {
+    const l = createLander(70, 20 - FOOT_Y + 3, 0);
+    l.angle = 0.5; // thrust pushes right, so the plume goes down-left
+    const hit = exhaustGroundHit(l, terrain);
+    expect(hit!.x).toBeLessThan(70);
+    const high = createLander(70, 20 + EXHAUST_REACH + 10, 0);
+    expect(exhaustGroundHit(high, terrain)).toBeNull();
+    const inverted = createLander(70, 30, 0);
+    inverted.angle = Math.PI; // plume points at the sky
+    expect(exhaustGroundHit(inverted, terrain)).toBeNull();
+  });
+});
+
+describe('cameraTargetY', () => {
+  const view = (cy: number, h: number) => [cy - h / 2, cy + h / 2];
+  it('shows the ground and the lander together in the overview', () => {
+    for (const h of [140, 174, 240]) {
+      const cy = cameraTargetY(115, 8, h);
+      const [bottom, top] = view(cy, h);
+      expect(bottom).toBeLessThan(8); // ground visible
+      expect(bottom).toBeGreaterThanOrEqual(-6 - 1e-9);
+      expect(115).toBeLessThanOrEqual(top - h * 0.2 + 1e-9); // lander clear of the top edge
+    }
+  });
+  it('follows the lander upwards when it climbs far above the ground', () => {
+    const h = 140;
+    const cy = cameraTargetY(400, 8, h);
+    const [, top] = view(cy, h);
+    expect(top - 400).toBeCloseTo(h * 0.2, 9);
+  });
+  it('keeps a ground margin when zoomed in close', () => {
+    const h = 65;
+    const cy = cameraTargetY(40, 30, h);
+    const [bottom, top] = view(cy, h);
+    expect(bottom).toBeCloseTo(30 - h * 0.22, 9);
+    expect(40).toBeGreaterThan(bottom);
+    expect(40).toBeLessThan(top);
+  });
+});
+
+describe('overviewZoom', () => {
+  it('fits the level width on a portrait phone', () => {
+    expect(overviewZoom(390, 600)).toBeCloseTo(390 / WORLD_W, 9);
+  });
+  it('fits the descent column on a short landscape view', () => {
+    const z = overviewZoom(844, 180);
+    expect(z).toBeCloseTo(180 / VIEW_H_MIN, 9);
+    expect(180 / z).toBeGreaterThanOrEqual(VIEW_H_MIN - 1e-9);
+    expect(overviewZoom(1, 1)).toBe(0.5);
+  });
+});
+
 /** A simple autopilot used to prove every level is winnable with the fuel it gets. */
 function autopilot(lv: Level): Input {
   const l = lv.lander;
@@ -484,8 +738,8 @@ function autopilot(lv: Level): Input {
 describe('solvability', () => {
   it('an autopilot lands every campaign and early endless level with fuel to spare', () => {
     const failures: string[] = [];
-    for (let n = 1; n <= 14; n++) {
-      for (let seed = 1; seed <= 6; seed++) {
+    for (let n = 1; n <= 16; n++) {
+      for (let seed = 1; seed <= 8; seed++) {
         const lv = createLevel(n, seed * 7919 + n);
         let result: ReturnType<typeof stepLevel> = null;
         for (let i = 0; i < 60 * 120 && !result; i++) result = stepLevel(lv, autopilot(lv));

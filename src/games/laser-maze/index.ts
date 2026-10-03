@@ -8,7 +8,10 @@ import {
   TARGET,
   WALL,
   allTargetsLit,
+  applyWin,
+  boardLayout,
   buildGrid,
+  cellFromPoint,
   cellIndex,
   generateLevel,
   hintFor,
@@ -16,6 +19,8 @@ import {
   isSplitter,
   nextOrient,
   orientOf,
+  restoreBoard,
+  snapshotBoard,
   traceBeam,
   type Dir,
   type Difficulty,
@@ -29,13 +34,14 @@ import './style.css';
 const strings = {
   zh: {
     rules:
-      '激光从发射器射出，沿直线前进，碰到墙或网格边缘就停止。\n点击空格放一面「/」镜子，再点一次变成「\\」，第三次移除。\n镜子让激光转向 90°；半透明的分光镜会让激光同时直行和转向。\n激光会穿过目标环并点亮它——点亮全部目标即过关。\n镜子数量有限（见底部），每一面都要放在对的位置。\n💡 替你放好一面正确的镜子（不计最佳用时）；↻ 清空已放的镜子。\n关卡无限：越往后网格越大，目标、墙和镜子越多。',
+      '激光从发射器射出，沿直线前进，碰到墙或网格边缘就停止。\n点击空格放一面「/」镜子，再点一次变成「\\」，第三次移除。\n镜子让激光转向 90°；半透明的分光镜会让激光同时直行和转向。\n激光穿过目标环就会点亮它——同时点亮全部目标即过关，怎么摆都行。\n可用镜子有限（见底部），不必全部用完。\n💡 替你放好一面镜子（本关不计最佳用时）；↻ 清空已放的镜子；☰ 回到选关，棋盘会保留。\n关卡无限：网格、目标、墙和镜子逐步增加，到顶后每关都是满难度的新迷宫（困难模式一开始就接近顶级）。',
     title: '激光镜面迷宫',
     desc: '摆放镜子，让激光命中所有目标',
-    trackEasy: '从 6×6、1 个目标、2 面镜子起步，逐关升级',
+    trackEasy: '从 6×6、1 个目标、2 面镜子起步，逐步升级',
     trackMedium: '从 7×7、3 个目标、4 面镜子起步，很快出现分光镜',
     trackHard: '9×9 · 4 个目标 · 5–6 面镜子 · 固定镜与分光镜',
     levelN: '第 {n} 关',
+    prevLevel: '上一关',
     bestLevel: '最高通关 第 {n} 关',
     noBest: '尚无记录',
     levelBest: '本关最佳 {t}',
@@ -53,13 +59,14 @@ const strings = {
   },
   en: {
     rules:
-      'The laser leaves the emitter in a straight line and stops at walls and the grid edge.\nTap an empty cell to place a "/" mirror, tap again for "\\", a third tap removes it.\nMirrors turn the beam 90°; a translucent splitter lets it go straight AND turn.\nThe beam passes through target rings and lights them — light every target to clear the level.\nYour mirror supply is limited (bottom bar); every one must be in the right spot.\n💡 places one correct mirror for you (no best time); ↻ clears your mirrors.\nLevels are endless: bigger grids, more targets, walls and mirrors as you go.',
+      'The laser leaves the emitter in a straight line and stops at walls and the grid edge.\nTap an empty cell to place a "/" mirror, tap again for "\\", a third tap removes it.\nMirrors turn the beam 90°; a translucent splitter lets it go straight AND turn.\nThe beam lights every target ring it passes through — light them all at once to clear the level; any layout counts.\nYour mirror supply is limited (bottom bar); you don\'t have to use them all.\n💡 places one mirror for you (no best time for that level); ↻ clears your mirrors; ☰ returns to level select and keeps your board.\nLevels are endless: grids, targets, walls and mirrors grow up to a top tier, then every level is a fresh full-difficulty maze (Hard starts near the top).',
     title: 'Laser Maze',
     desc: 'Place mirrors to hit every target',
-    trackEasy: 'Starts at 6×6, 1 target, 2 mirrors and grows every level',
+    trackEasy: 'Starts at 6×6, 1 target, 2 mirrors and grows as you go',
     trackMedium: 'Starts at 7×7, 3 targets, 4 mirrors; splitters soon',
     trackHard: '9×9 · 4 targets · 5–6 mirrors · fixed mirrors & splitters',
     levelN: 'Level {n}',
+    prevLevel: 'Previous level',
     bestLevel: 'Best: level {n} cleared',
     noBest: 'No record yet',
     levelBest: 'Level best {t}',
@@ -88,6 +95,8 @@ interface Colors {
   muted: string;
   accent: string;
   accent2: string;
+  /** Highlight drawn on top of the accent beam (theme's text-on-accent colour). */
+  hot: string;
   success: string;
   danger: string;
   warning: string;
@@ -98,6 +107,10 @@ const FLASH_DUR = 0.45;
 const PULSE_DUR = 0.7;
 const SHAKE_DUR = 0.35;
 const WIN_DUR = 1.6;
+/** Ambient effects (beam shimmer, sparks, breathing targets) are redrawn at this rate when idle. */
+const AMBIENT_FPS = 30;
+/** After this many seconds without input the ambient animation pauses until the next touch. */
+const IDLE_FREEZE = 20;
 
 function hexToRgb(hex: string): [number, number, number] | null {
   const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
@@ -135,6 +148,8 @@ function create(ctx: GameContext): GameInstance {
   let elapsed = 0;
   let lastStatusSec = -1;
   let hints = 0;
+  /** The player changed this board (or resumed it), so it is worth saving when they leave. */
+  let boardTouched = false;
 
   // ── Animation state ───────────────────────────────────────────────────
   let time = 0;
@@ -146,6 +161,10 @@ function create(ctx: GameContext): GameInstance {
   let litPrev = new Set<number>();
   let shake: { cell: number; t: number } | null = null;
   let winT = -1;
+  /** Something changed that needs a redraw on the next frame. */
+  let dirty = true;
+  let ambientAcc = 0;
+  let idleFor = 0;
 
   // ── Layout / DOM ──────────────────────────────────────────────────────
   let cell = 40;
@@ -161,6 +180,8 @@ function create(ctx: GameContext): GameInstance {
   let modalTimer = 0;
   let hudShakeTimer = 0;
   let removeNext: (() => void) | null = null;
+  let removeHint: (() => void) | null = null;
+  let removeRestart: (() => void) | null = null;
 
   function readColors(): Colors {
     return {
@@ -172,6 +193,7 @@ function create(ctx: GameContext): GameInstance {
       muted: ctx.cssVar('--muted') || '#8b94a7',
       accent: ctx.cssVar('--accent') || '#5b8cff',
       accent2: ctx.cssVar('--accent-2') || '#ff7a59',
+      hot: ctx.cssVar('--accent-text') || '#ffffff',
       success: ctx.cssVar('--success') || '#3ddc97',
       danger: ctx.cssVar('--danger') || '#ff5470',
       warning: ctx.cssVar('--warning') || '#ffc857',
@@ -182,26 +204,36 @@ function create(ctx: GameContext): GameInstance {
   const unlocked = (): number => Math.max(1, ctx.storage.get<number>(`unlocked:${mode}`, 1));
   const savedLevel = (): number => clamp(ctx.storage.get<number>(`level:${mode}`, unlocked()), 1, unlocked());
   const times = (): Record<string, number> => ctx.storage.get<Record<string, number>>(`times:${mode}`, {});
+  const boardKey = (): string => `board:${mode}`;
 
-  // ── Header actions / lifecycle ────────────────────────────────────────
-  const removeHint = ctx.addHeaderAction({ icon: '💡', label: t('hint'), onClick: giveHint });
-  const removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
-  ctx.onDestroy(() => {
-    removeHint();
-    removeRestart();
-    teardownGame();
-  });
+  /** Keep the unfinished board (mirrors, clock, hints) so leaving a level never loses it. */
+  function saveBoard(): void {
+    if (phase !== 'playing' || !lv || !boardTouched) return;
+    ctx.storage.set(boardKey(), snapshotBoard(level, lv, placed, elapsed, hints));
+  }
+  function clearSavedBoard(): void {
+    const raw = ctx.storage.get<{ level?: unknown } | null>(boardKey(), null);
+    if (raw && raw.level === level) ctx.storage.remove(boardKey());
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────
   ctx.onVisibility((visible) => {
+    if (!visible) saveBoard();
     if (!loop) return;
-    if (visible) loop.start();
-    else loop.stop();
+    if (visible) {
+      dirty = true;
+      loop.start();
+    } else loop.stop();
   });
   ctx.onThemeChange((th) => {
     theme = th;
     colors = readColors();
+    dirty = true;
   });
 
+  /** Leave the current board: save it if unfinished, stop timers / loop / input, drop header actions. */
   function teardownGame(): void {
+    saveBoard();
     clearTimeout(winTimer);
     clearTimeout(modalTimer);
     clearTimeout(hudShakeTimer);
@@ -213,6 +245,10 @@ function create(ctx: GameContext): GameInstance {
     cv = null;
     removeNext?.();
     removeNext = null;
+    removeHint?.();
+    removeHint = null;
+    removeRestart?.();
+    removeRestart = null;
     press = null;
     hudMirrors = null;
     hudTargets = null;
@@ -233,8 +269,10 @@ function create(ctx: GameContext): GameInstance {
     const bestLine = el('p', { class: 'muted small' });
     const prev = button('◀', () => stepLevel(-1), { variant: 'secondary', class: 'lm-step' });
     const next = button('▶', () => stepLevel(1), { variant: 'secondary', class: 'lm-step' });
-    prev.setAttribute('aria-label', 'previous level');
-    next.setAttribute('aria-label', 'next level');
+    prev.setAttribute('aria-label', t('prevLevel'));
+    next.setAttribute('aria-label', t('nextLevel'));
+    const play = button(t('play'), () => startLevel(), { variant: 'primary', size: 'lg', class: 'lm-play' });
+    const playLabel = play.lastElementChild as HTMLElement;
 
     const refresh = () => {
       trackLine.textContent = t(mode === 'easy' ? 'trackEasy' : mode === 'medium' ? 'trackMedium' : 'trackHard');
@@ -246,6 +284,8 @@ function create(ctx: GameContext): GameInstance {
       const parts: string[] = [best === null ? t('noBest') : t('bestLevel', { n: best })];
       if (lt !== undefined) parts.push(t('levelBest', { t: formatTime(lt) }));
       bestLine.textContent = parts.join(' · ');
+      const saved = ctx.storage.get<{ level?: unknown } | null>(boardKey(), null);
+      playLabel.textContent = t(saved && saved.level === level ? 'resume' : 'play');
     };
     const stepLevel = (d: number) => {
       const n = clamp(level + d, 1, unlocked());
@@ -280,13 +320,14 @@ function create(ctx: GameContext): GameInstance {
         trackLine,
         el('div', { class: 'lm-level-pick' }, prev, levelLabel, next),
         bestLine,
-        button(t('play'), () => startLevel(), { variant: 'primary', size: 'lg', class: 'lm-play' }),
+        play,
       ),
     );
   }
 
   // ── Game screen ───────────────────────────────────────────────────────
-  function startLevel(): void {
+  /** Open the current level. Resumes a saved unfinished board unless `fresh` (replay after a win). */
+  function startLevel(fresh = false): void {
     teardownGame();
     lv = generateLevel(mode, level);
     fixedGrid = buildGrid(lv);
@@ -294,6 +335,14 @@ function create(ctx: GameContext): GameInstance {
     trace = null;
     hints = 0;
     elapsed = 0;
+    boardTouched = false;
+    const saved = fresh ? null : restoreBoard(ctx.storage.get<unknown>(boardKey(), null), level, lv);
+    if (saved) {
+      placed = saved.placed;
+      hints = saved.hints;
+      elapsed = saved.elapsed;
+      boardTouched = true;
+    }
     lastStatusSec = -1;
     phase = 'playing';
     winT = -1;
@@ -301,7 +350,11 @@ function create(ctx: GameContext): GameInstance {
     pulse.clear();
     litPrev = new Set();
     shake = null;
+    dirty = true;
+    idleFor = 0;
     ctx.storage.set(`level:${mode}`, level);
+    removeHint = ctx.addHeaderAction({ icon: '💡', label: t('hint'), onClick: giveHint });
+    removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
 
     root.innerHTML = '';
     const area = el('div', { class: 'game-area lm-area' });
@@ -325,11 +378,12 @@ function create(ctx: GameContext): GameInstance {
       el('div', { class: 'stat' }, el('div', { class: 'stat-label', text: t('mirrors') }), hudMirrors),
       el('div', { class: 'stat' }, el('div', { class: 'stat-label', text: t('targets') }), hudTargets),
     );
-    root.append(area, hud);
+    root.append(el('div', { class: 'lm-game' }, area, hud));
 
     cv = createCanvas(area, (w, h) => relayout(w, h));
     offPointer = onPointer(cv.canvas, {
       down(p) {
+        idleFor = 0;
         if (phase !== 'playing') return;
         const c = cellAt(p.x, p.y);
         press = c >= 0 ? { cell: c, x: p.x, y: p.y } : null;
@@ -359,19 +413,13 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function relayout(w: number, h: number): void {
-    const n = lv?.size ?? 6;
-    const pad = 6;
-    cell = Math.max(8, Math.min(64, Math.floor((w - 2 * pad) / n), Math.floor((h - 2 * pad) / n)));
-    ox = Math.floor((w - cell * n) / 2);
-    oy = Math.floor((h - cell * n) / 2);
+    ({ cell, ox, oy } = boardLayout(w, h, lv?.size ?? 6));
+    dirty = true;
   }
 
   function cellAt(px: number, py: number): number {
     if (!lv) return -1;
-    const x = Math.floor((px - ox) / cell);
-    const y = Math.floor((py - oy) / cell);
-    if (x < 0 || y < 0 || x >= lv.size || y >= lv.size) return -1;
-    return cellIndex(lv.size, x, y);
+    return cellFromPoint(px, py, { cell, ox, oy }, lv.size);
   }
 
   function placedList(): Placement[] {
@@ -409,8 +457,10 @@ function create(ctx: GameContext): GameInstance {
     }
     ctx.haptic('light');
     flash.set(c, FLASH_DUR);
+    boardTouched = true;
     retrace(c);
     updateHud();
+    saveBoard();
   }
 
   function shakeHud(): void {
@@ -438,6 +488,8 @@ function create(ctx: GameContext): GameInstance {
     revealSpeed = Math.max(28, (revealTarget - from) / 0.5);
     for (const c of trace.lit) if (!litPrev.has(c)) pulse.set(c, PULSE_DUR);
     litPrev = new Set(trace.lit);
+    dirty = true;
+    idleFor = 0;
     if (phase === 'playing' && allTargetsLit(trace, lv)) finishLevel();
   }
 
@@ -456,8 +508,10 @@ function create(ctx: GameContext): GameInstance {
     ctx.play('place');
     ctx.haptic('medium');
     ctx.toast(t('hintUsed'));
+    boardTouched = true;
     retrace(k);
     updateHud();
+    saveBoard();
   }
 
   function onRestart(): void {
@@ -467,10 +521,12 @@ function create(ctx: GameContext): GameInstance {
       ctx.play('pop');
       ctx.haptic('medium');
       ctx.toast(t('mirrorsCleared'));
+      boardTouched = true;
       retrace();
       updateHud();
+      saveBoard();
     } else if (phase === 'won') {
-      startLevel();
+      startLevel(true);
     }
   }
 
@@ -480,37 +536,42 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function finishLevel(): void {
+    if (!lv) return;
     phase = 'won';
     press = null;
+    dirty = true;
+    // Persist the clear right away: a restart, the level chip or leaving the game during the
+    // celebration delay below must never lose it.
+    const res = applyWin(unlocked(), times(), level, elapsed, hints);
+    ctx.storage.set(`unlocked:${mode}`, res.unlocked);
+    const bestLevel = ctx.storage.recordBest(mode, level, 'higher');
+    if (res.timeSaved) ctx.storage.set(`times:${mode}`, res.times);
+    ctx.storage.set(`level:${mode}`, res.selectLevel);
+    clearSavedBoard();
+    const newBest = bestLevel || res.improvedTime;
+
+    ctx.setStatus(t('statusWon', { n: level, t: formatTime(elapsed) }));
+    removeHint?.();
+    removeHint = null;
+    removeNext?.();
+    removeNext = ctx.addHeaderAction({ icon: '▶', label: t('nextLevel'), onClick: nextLevel });
+    updateHud();
     ctx.play('success');
+
+    // Only the fanfare and the result modal wait for the beam reveal to finish.
     const remaining = Math.max(0, (revealTarget - revealD) / revealSpeed);
     winTimer = window.setTimeout(() => {
-      if (!lv) return;
+      if (!lv || phase !== 'won') return;
       ctx.play('win');
       ctx.haptic('success');
       winT = 0;
-      if (level + 1 > unlocked()) ctx.storage.set(`unlocked:${mode}`, level + 1);
-      const bestLevel = ctx.storage.recordBest(mode, level, 'higher');
-      let improvedTime = false;
-      if (hints === 0) {
-        const tm = times();
-        const prev = tm[String(level)];
-        if (prev === undefined || elapsed < prev) {
-          tm[String(level)] = Math.round(elapsed * 10) / 10;
-          ctx.storage.set(`times:${mode}`, tm);
-          improvedTime = prev !== undefined;
-        }
-      }
-      ctx.setStatus(t('statusWon', { n: level, t: formatTime(elapsed) }));
-      updateHud();
-      removeNext?.();
-      removeNext = ctx.addHeaderAction({ icon: '▶', label: t('nextLevel'), onClick: nextLevel });
-      modalTimer = window.setTimeout(() => showResult(bestLevel || improvedTime), 950);
+      dirty = true;
+      modalTimer = window.setTimeout(() => showResult(newBest), 950);
     }, Math.min(900, remaining * 1000 + 250));
   }
 
   function showResult(newBest: boolean): void {
-    if (!lv) return;
+    if (!lv || phase !== 'won') return;
     const body = el(
       'div',
       {},
@@ -524,6 +585,7 @@ function create(ctx: GameContext): GameInstance {
       dismissible: true,
       buttons: [
         { label: t('home'), onClick: () => ctx.exit() },
+        { label: t('retry'), onClick: () => startLevel(true) },
         { label: t('nextLevel'), primary: true, onClick: () => nextLevel() },
       ],
     });
@@ -555,10 +617,15 @@ function create(ctx: GameContext): GameInstance {
   // ── Loop ──────────────────────────────────────────────────────────────
   function update(dt: number): void {
     time += dt;
+    idleFor += dt;
+    ambientAcc += dt;
     if (phase === 'playing') {
       elapsed += dt;
       updateStatus();
     }
+    // Transient animations (beam reveal, flashes, pulses, shake, win rings) run at full frame rate.
+    const animating =
+      revealD < revealTarget || flash.size > 0 || pulse.size > 0 || shake !== null || (winT >= 0 && winT < WIN_DUR);
     if (revealD < revealTarget) revealD = Math.min(revealTarget, revealD + revealSpeed * dt);
     for (const [k, v] of flash) {
       if (v - dt <= 0) flash.delete(k);
@@ -572,8 +639,16 @@ function create(ctx: GameContext): GameInstance {
       shake.t -= dt;
       if (shake.t <= 0) shake = null;
     }
-    if (winT >= 0) winT += dt;
-    draw();
+    if (winT >= 0 && winT < WIN_DUR) winT += dt;
+    if (animating || dirty) {
+      dirty = false;
+      ambientAcc = 0;
+      draw();
+    } else if (phase === 'playing' && idleFor < IDLE_FREEZE && ambientAcc >= 1 / AMBIENT_FPS - 0.002) {
+      // Ambient shimmer only: a lower frame rate saves battery, and it pauses when the player is idle.
+      ambientAcc = 0;
+      draw();
+    }
   }
 
   // ── Drawing ───────────────────────────────────────────────────────────
@@ -588,7 +663,7 @@ function create(ctx: GameContext): GameInstance {
 
     // Board panel (inset clamped so the 1px border never leaves the canvas)
     const m = Math.max(0.5, Math.min(7, ox - 0.5, oy - 0.5));
-    roundRect(g, ox - m, oy - m, n * cell + 2 * m, n * cell + 2 * m, 16);
+    roundRect(g, ox - m, oy - m, n * cell + 2 * m, n * cell + 2 * m, Math.min(16, m + cell * 0.18 + 1.5));
     g.fillStyle = colors.surface;
     g.fill();
     g.strokeStyle = colors.border;
@@ -615,7 +690,7 @@ function create(ctx: GameContext): GameInstance {
           g.save();
           roundRect(g, px + 2.5, py + 2.5, cell - 5, cell - 5, r);
           g.clip();
-          g.strokeStyle = dark ? rgba(colors.border, 1) : rgba('#ffffff', 0.28);
+          g.strokeStyle = dark ? colors.border : rgba(colors.surface, 0.32);
           g.lineWidth = 1.5;
           g.beginPath();
           const h3 = (cell - 3) / 3;
@@ -634,7 +709,7 @@ function create(ctx: GameContext): GameInstance {
           g.stroke();
           g.restore();
         } else {
-          g.fillStyle = dark ? colors.surface2 : colors.surface2;
+          g.fillStyle = colors.surface2;
           g.fill();
           if (code === EMPTY && !placed.has(i) && phase === 'playing') {
             // subtle dot marks a placeable cell
@@ -726,7 +801,7 @@ function create(ctx: GameContext): GameInstance {
       { w: cell * 0.38, c: rgba(colors.accent, 0.14 * glow) },
       { w: cell * 0.16, c: rgba(colors.accent, 0.45 * glow) },
       { w: cell * 0.07, c: rgba(colors.accent, 0.95) },
-      { w: cell * 0.03, c: rgba('#ffffff', 0.9) },
+      { w: cell * 0.03, c: rgba(colors.hot, 0.9) },
     ];
     let head: { hx: number; hy: number } | null = null;
     for (const p of passes) {
@@ -740,14 +815,14 @@ function create(ctx: GameContext): GameInstance {
     g.setLineDash([cell * 0.18, cell * 0.62]);
     g.lineDashOffset = -((time * cell * 2.2) % (cell * 0.8));
     beamPath(g, rd);
-    g.strokeStyle = rgba('#ffffff', 0.55);
+    g.strokeStyle = rgba(colors.hot, 0.55);
     g.lineWidth = cell * 0.055;
     g.stroke();
     g.restore();
     if (head) {
       g.beginPath();
       g.arc(head.hx, head.hy, cell * 0.13, 0, Math.PI * 2);
-      g.fillStyle = rgba('#ffffff', 0.95);
+      g.fillStyle = rgba(colors.hot, 0.95);
       g.shadowColor = colors.accent;
       g.shadowBlur = cell * 0.4;
       g.fill();
@@ -777,7 +852,7 @@ function create(ctx: GameContext): GameInstance {
     g.shadowBlur = cell * 0.35;
     g.beginPath();
     g.arc(cell * 0.44, 0, cell * 0.085, 0, Math.PI * 2);
-    g.fillStyle = '#ffffff';
+    g.fillStyle = colors.hot;
     g.fill();
     g.shadowBlur = 0;
     // core
@@ -787,7 +862,7 @@ function create(ctx: GameContext): GameInstance {
     g.fill();
     g.beginPath();
     g.arc(0, 0, cell * 0.05, 0, Math.PI * 2);
-    g.fillStyle = rgba('#ffffff', 0.8);
+    g.fillStyle = rgba(colors.hot, 0.8);
     g.fill();
     g.restore();
   }
@@ -813,7 +888,7 @@ function create(ctx: GameContext): GameInstance {
       g.shadowBlur = 0;
       g.beginPath();
       g.arc(cx, cy, cell * 0.05, 0, Math.PI * 2);
-      g.fillStyle = '#ffffff';
+      g.fillStyle = colors.hot;
       g.fill();
     } else {
       g.beginPath();
@@ -881,7 +956,7 @@ function create(ctx: GameContext): GameInstance {
       g.beginPath();
       g.moveTo(ax, ay);
       g.lineTo(bx, by);
-      g.strokeStyle = rgba('#ffffff', hit ? 0.85 : 0.55);
+      g.strokeStyle = rgba(colors.hot, hit ? 0.85 : 0.55);
       g.lineWidth = cell * 0.045;
       g.stroke();
     }

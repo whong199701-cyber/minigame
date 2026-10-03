@@ -1,8 +1,10 @@
-import type { GameContext, GameInstance, GameModule, ThemeName } from '../../app/types';
+import type { GameContext, GameInstance, GameModule, Lang, ModalButton, ModalHandle, ThemeName } from '../../app/types';
 import { el, button, segmented, toggle, formatTime } from '../../app/ui';
 import { createCanvas, createLoop, onPointer, roundRect } from '../../app/canvas';
 import {
+  BOARDS,
   LAYOUTS,
+  boardFor,
   countPairs,
   computeMetrics,
   drawOrder,
@@ -16,6 +18,8 @@ import {
   reshuffle,
   suitOf,
   tileRect,
+  type Board,
+  type BoardId,
   type LayoutId,
   type Metrics,
   type Tile,
@@ -25,11 +29,21 @@ import './style.css';
 const HINT_PENALTY = 15;
 const SHUFFLE_PENALTY = 30;
 const MAX_SHUFFLES = 2;
+/** Board padding inside the canvas (CSS px); the table panel is drawn inside it. */
+const BOARD_PAD = 6;
+/** Fixed HUD sizes (must match style.css): bottom bar height in portrait, side bar width in landscape. */
+const BAR_H = 50;
+const BAR_W = 92;
+/**
+ * Below this game width four header icons would squeeze the shell's title to nothing, so 🔀 moves out of
+ * the header and the HUD's shuffle counter becomes a button instead.
+ */
+const NARROW_W = 370;
 
 const strings = {
   zh: {
     rules:
-      '目标：两两配对消除所有麻将牌。\n可选的牌：上面没有牌压着，并且左边或右边至少有一侧没有紧挨着的牌。\n点击两张可选且相同的牌即可消除；花牌（梅兰菊竹）互相可配，季牌（春夏秋冬）互相可配，其余必须完全相同。\n每局保证有解，但同一种牌有四张时，消错顺序仍可能陷入死局——先想清楚再出手。\n提示会闪烁一对可消的牌，但计时 +15 秒；洗牌最多 2 次，每次 +30 秒；撤销不受惩罚。\n用时越短越好，三种布局分别记录最佳成绩。',
+      '目标：两两配对消除所有牌，用时越短越好。\n可选的牌：上面没有牌压着，且左右至少一侧没有紧挨着的牌（可设置把不可选的牌压暗）。\n点击两张可选的相同牌即可消除；花牌（梅兰菊竹，左上角有小花）互相可配，季牌（春夏秋冬，左上角有叶子）互相可配，其余须完全相同。\n每局保证有解，但消错顺序仍可能陷入死局，先想清楚再出手。\n💡 提示一对（+15 秒）· 🔀 洗牌，重新分配剩余的牌并保证有解（最多 2 次，每次 +30 秒；剩下的位置怎么分配都清不完时无效，不扣次数）· ↶ 撤销（不罚时）· ↻ 重新发牌或换布局。\n乌龟：横屏和平板上为经典乌龟，竖持手机时为竖屏改编版；每种布局分别记录最佳用时。',
     desc: '点选两张可移动的相同牌将它们消除，清空整副牌。',
     chooseLayout: '选择布局',
     modeSmall: '金字塔 72',
@@ -40,35 +54,40 @@ const strings = {
     layoutLarge: '乌龟',
     descSmall: '72 张 · 3 层 · 热身局',
     descMedium: '100 张 · 3 层 · 城墙与主堡',
-    descLarge: '144 张 · 5 层 · 经典乌龟全牌',
+    descLarge: '144 张 · 5 层 · 经典乌龟',
+    descLargePortrait: '144 张 · 5 层 · 竖屏版乌龟（横屏或平板上为经典乌龟）',
     bestLine: '最佳 {time} · 已通关 {n} 次',
     noBest: '尚无纪录，快来创造吧',
     dimBlocked: '压暗不可选的牌',
     tilesLeft: '剩余',
     pairsLeft: '可配对',
-    hintBtn: '提示',
-    shuffleBtn: '洗牌 {n}',
-    status: '{layout} · 洗牌剩 {n} 次',
+    shufflesLeft: '洗牌',
+    hintBtn: '提示（+{n} 秒）',
+    shuffleBtn: '洗牌（+{n} 秒）',
+    newDeal: '重新发牌',
+    changeLayout: '换一个布局',
     hintPenalty: '提示 +{n} 秒',
     shufflePenalty: '已洗牌 +{n} 秒',
     noShuffles: '洗牌次数已用完',
+    shuffleUseless: '洗牌也无济于事：剩下的牌无论怎样分配都无法清空',
     nothingToUndo: '没有可撤销的操作',
-    blockedTile: '这张牌被挡住了',
     noMoves: '没有可消除的牌了',
-    noMovesBody: '剩余 {n} 张牌没有可配对的组合。可以洗牌（+{p} 秒）、撤销几步，或重新开始。',
-    noMovesNoShuffle: '剩余 {n} 张牌没有可配对的组合，洗牌次数已用完。撤销几步或重新开始。',
-    shuffleAction: '洗牌 ({n})',
+    noMovesBody: '剩余 {n} 张牌没有可配对的组合。可以洗牌（+{p} 秒）、撤销几步，或重新发牌。',
+    noMovesNoShuffle: '剩余 {n} 张牌没有可配对的组合，洗牌次数已用完。撤销几步或重新发牌。',
+    noMovesStuck: '剩余 {n} 张牌没有可配对的组合，而且它们的位置无论怎样分配都无法清空，洗牌也无济于事。撤销几步或重新发牌。',
+    shuffleAction: '洗牌（剩 {n} 次）',
     winBody: '清空了全部 {n} 张牌！',
     finalTime: '最终用时',
     penalties: '含惩罚：提示 {h} 次 · 洗牌 {s} 次（+{p} 秒）',
     bestTime: '最佳 {time}',
-    restartConfirm: '当前进度将丢失，确定重新开始？',
+    restartConfirm: '当前进度将丢失。重新发一副牌？',
+    restartFresh: '重新发一副牌？',
     legendFlower: '花牌互配',
     legendSeason: '季牌互配',
   },
   en: {
     rules:
-      'Goal: clear the whole board by removing matching pairs.\nA tile is FREE when nothing lies on top of it and at least one of its left or right sides has no tile touching it.\nTap two free matching tiles to remove them. Any flower matches any flower, any season matches any season; all other tiles must be identical.\nEvery deal is solvable, but with four tiles of a kind the wrong pair can still lead to a dead end — think before you tap.\nHint flashes a playable pair (+15 s). Shuffle re-deals the remaining tiles (max 2, +30 s each). Undo is free.\nFastest clear wins; each layout keeps its own best time.',
+      'Goal: clear the board by removing matching pairs, as fast as you can.\nA tile is FREE when nothing lies on it and its left or right side is open (blocked tiles can be dimmed).\nTap two free matching tiles to remove them. Any flower (梅蘭菊竹, blossom mark) matches any flower, any season (春夏秋冬, leaf mark) any season; other tiles must be identical.\nEvery deal is solvable, but a careless pair can still lead to a dead end.\n💡 hint (+15 s) · 🔀 shuffle re-deals the rest solvably (max 2, +30 s; not used up if no arrangement can be cleared) · ↶ undo (free) · ↻ new deal or another layout.\nTurtle: classic in landscape and on tablets, re-shaped for upright phones. Each layout keeps its own best time.',
     desc: 'Tap two free matching tiles to remove them and clear the board.',
     chooseLayout: 'Choose a layout',
     modeSmall: 'Pyramid 72',
@@ -79,35 +98,95 @@ const strings = {
     layoutLarge: 'Turtle',
     descSmall: '72 tiles · 3 layers · warm-up',
     descMedium: '100 tiles · 3 layers · walls and a keep',
-    descLarge: '144 tiles · 5 layers · the classic full set',
+    descLarge: '144 tiles · 5 layers · the classic turtle',
+    descLargePortrait: '144 tiles · 5 layers · turtle re-shaped for portrait (classic in landscape / on tablets)',
     bestLine: 'Best {time} · cleared {n}×',
     noBest: 'No record yet — set one!',
     dimBlocked: 'Dim blocked tiles',
     tilesLeft: 'Tiles',
     pairsLeft: 'Pairs',
-    hintBtn: 'Hint',
-    shuffleBtn: 'Shuffle {n}',
-    status: '{layout} · shuffles left: {n}',
+    shufflesLeft: 'Shuffles',
+    hintBtn: 'Hint (+{n} s)',
+    shuffleBtn: 'Shuffle (+{n} s)',
+    newDeal: 'New deal',
+    changeLayout: 'Choose another layout',
     hintPenalty: 'Hint +{n} s',
     shufflePenalty: 'Shuffled +{n} s',
     noShuffles: 'No shuffles left',
+    shuffleUseless: "A shuffle can't help: these tiles can't be cleared in any arrangement",
     nothingToUndo: 'Nothing to undo',
-    blockedTile: 'That tile is blocked',
     noMoves: 'No moves left',
-    noMovesBody: '{n} tiles remain but none can be paired. Shuffle (+{p} s), undo a few moves, or restart.',
-    noMovesNoShuffle: '{n} tiles remain but none can be paired, and no shuffles are left. Undo a few moves or restart.',
-    shuffleAction: 'Shuffle ({n})',
+    noMovesBody: '{n} tiles remain but none can be paired. Shuffle (+{p} s), undo a few moves, or deal again.',
+    noMovesNoShuffle: '{n} tiles remain but none can be paired, and no shuffles are left. Undo a few moves or deal again.',
+    noMovesStuck: "{n} tiles remain but none can be paired, and their positions can't be cleared in any arrangement, so a shuffle can't help. Undo a few moves or deal again.",
+    shuffleAction: 'Shuffle ({n} left)',
     winBody: 'All {n} tiles cleared!',
     finalTime: 'Final time',
     penalties: 'Incl. penalties: hints ×{h} · shuffles ×{s} (+{p} s)',
     bestTime: 'Best {time}',
-    restartConfirm: 'Current progress will be lost. Restart?',
+    restartConfirm: 'Current progress will be lost. Deal a new board?',
+    restartFresh: 'Deal a new board?',
     legendFlower: 'Flowers pair together',
     legendSeason: 'Seasons pair together',
   },
 };
 
-// ── Tile artwork ──────────────────────────────────────────────────────────
+// ── Colours (derived from the theme tokens) ───────────────────────────────
+
+type RGB = [number, number, number];
+
+/** Token values used only if a custom property cannot be read (mirrors src/styles/base.css). */
+const TOKEN_FALLBACK: Record<ThemeName, Record<string, string>> = {
+  dark: {
+    '--bg': '#0f1218',
+    '--surface': '#1a1f2b',
+    '--surface-2': '#232a39',
+    '--border': '#2d3548',
+    '--text': '#e8ecf3',
+    '--muted': '#8b94a7',
+    '--accent': '#5b8cff',
+    '--accent-2': '#ff7a59',
+    '--success': '#3ddc97',
+    '--danger': '#ff5470',
+    '--warning': '#ffc857',
+  },
+  light: {
+    '--bg': '#f4f6fb',
+    '--surface': '#ffffff',
+    '--surface-2': '#eef1f7',
+    '--border': '#dde2ec',
+    '--text': '#171a21',
+    '--muted': '#5c6475',
+    '--accent': '#3366ff',
+    '--accent-2': '#ff6a3d',
+    '--success': '#1fa86b',
+    '--danger': '#e0304f',
+    '--warning': '#d9960a',
+  },
+};
+
+function parseColor(raw: string): RGB | null {
+  const s = raw.trim();
+  let m = /^#([0-9a-f]{3})$/i.exec(s);
+  if (m) return [0, 1, 2].map((i) => parseInt(m![1][i] + m![1][i], 16)) as RGB;
+  m = /^#([0-9a-f]{6})/i.exec(s);
+  if (m) return [0, 2, 4].map((i) => parseInt(m![1].slice(i, i + 2), 16)) as RGB;
+  m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i.exec(s);
+  if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return null;
+}
+
+function mix(a: RGB, b: RGB, t: number): RGB {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+
+function hex(c: RGB): string {
+  return '#' + c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+}
+
+function rgba(c: RGB, alpha: number): string {
+  return `rgba(${c.map((v) => Math.round(v)).join(', ')}, ${alpha})`;
+}
 
 interface Palette {
   face: string;
@@ -123,61 +202,58 @@ interface Palette {
   orange: string;
   dim: string;
   table: string;
+  shadow: string;
   accent: string;
   warning: string;
-  success: string;
-  bg: string;
 }
 
+/**
+ * Canvas colours, all derived from the theme tokens (--bg / --surface / --surface-2 / --border / --text /
+ * --muted and the accent colours) so the board follows any change of the theme.
+ */
 function makePalette(theme: ThemeName, cssVar: (n: string) => string): Palette {
-  const accent = cssVar('--accent') || '#5b8cff';
-  const warning = cssVar('--warning') || '#ffc857';
-  const success = cssVar('--success') || '#3ddc97';
-  if (theme === 'dark') {
-    return {
-      face: '#353d53',
-      faceFlower: '#42385a',
-      faceSeason: '#4b3f33',
-      side: '#161a25',
-      edge: '#4b556c',
-      ink: '#f2f4f9',
-      red: '#ff6d7c',
-      green: '#5fd38d',
-      blue: '#84b2ff',
-      magenta: '#ff85d8',
-      orange: '#ffad5c',
-      dim: 'rgba(15, 18, 24, 0.5)',
-      table: '#161b26',
-      accent,
-      warning,
-      success,
-      bg: '#0f1218',
-    };
-  }
+  const v = (name: string): RGB => parseColor(cssVar(name) || '') ?? (parseColor(TOKEN_FALLBACK[theme][name]) as RGB);
+  const dark = theme === 'dark';
+  const bg = v('--bg');
+  const surface = v('--surface');
+  const surface2 = v('--surface-2');
+  const border = v('--border');
+  const text = v('--text');
+  const muted = v('--muted');
+  const accent = v('--accent');
+  const accent2 = v('--accent-2');
+  const success = v('--success');
+  const danger = v('--danger');
+  const warning = v('--warning');
+  // Tile face: the border tone lifted towards the text in dark mode, a warm ivory surface in light mode.
+  const face = dark ? mix(border, text, 0.09) : mix(surface, warning, 0.05);
+  const magenta = mix(mix(danger, accent, 0.35), text, dark ? 0.15 : 0);
+  const orange = mix(mix(accent2, warning, 0.35), text, dark ? 0 : 0.15);
   return {
-    face: '#fffdf4',
-    faceFlower: '#fbe8f3',
-    faceSeason: '#fff0da',
-    side: '#b8b2a0',
-    edge: '#e4dfcf',
-    ink: '#1c2130',
-    red: '#c81e35',
-    green: '#1e8c4d',
-    blue: '#1f4fc1',
-    magenta: '#bf1a7e',
-    orange: '#d8700a',
-    dim: 'rgba(244, 246, 251, 0.5)',
-    table: '#e8ecf4',
-    accent,
-    warning,
-    success,
-    bg: '#f4f6fb',
+    face: hex(face),
+    faceFlower: hex(mix(face, magenta, dark ? 0.14 : 0.09)),
+    faceSeason: hex(mix(face, orange, dark ? 0.14 : 0.1)),
+    side: hex(dark ? mix(face, bg, 0.45) : mix(face, muted, 0.42)),
+    edge: hex(dark ? mix(face, text, 0.14) : mix(face, border, 0.9)),
+    ink: hex(text),
+    red: hex(mix(danger, text, 0.12)),
+    green: hex(mix(success, text, dark ? 0.1 : 0.28)),
+    blue: hex(mix(accent, text, 0.3)),
+    magenta: hex(magenta),
+    orange: hex(orange),
+    dim: rgba(bg, 0.52),
+    table: hex(dark ? mix(bg, surface, 0.6) : mix(surface2, border, 0.5)),
+    shadow: dark ? 'rgba(0, 0, 0, 0.55)' : rgba(text, 0.4),
+    accent: hex(accent),
+    warning: hex(warning),
   };
 }
 
 const CJK_FONT = '"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC","Noto Sans CJK SC","WenQuanYi Zen Hei",sans-serif';
+const LATIN_FONT = '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
 const NUMERALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
 const WINDS = ['東', '南', '西', '北'];
+const WIND_INDEX = ['E', 'S', 'W', 'N'];
 const DRAGONS = ['中', '發', '白'];
 const FLOWERS = ['梅', '蘭', '菊', '竹'];
 const SEASONS = ['春', '夏', '秋', '冬'];
@@ -316,12 +392,49 @@ function rowsOf(cells: [number, number][]): number {
   return max > 2 ? 4 : 3;
 }
 
-/** Draw one tile face (background + glyph) at (0,0) with size w×h. */
-function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: number, p: Palette): void {
+/** Five-petal blossom: the corner mark of the flower tiles (and the start-screen legend). */
+function drawBlossom(g: CanvasRenderingContext2D, cx: number, cy: number, r: number, color: string, center: string): void {
+  g.fillStyle = color;
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / 5;
+    g.beginPath();
+    g.arc(cx + Math.cos(a) * r * 0.55, cy + Math.sin(a) * r * 0.55, r * 0.45, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.fillStyle = center;
+  g.beginPath();
+  g.arc(cx, cy, r * 0.26, 0, Math.PI * 2);
+  g.fill();
+}
+
+/** A leaf with a midrib: the corner mark of the season tiles. */
+function drawLeaf(g: CanvasRenderingContext2D, cx: number, cy: number, r: number, color: string, vein: string): void {
+  g.save();
+  g.translate(cx, cy);
+  g.rotate(-Math.PI / 4);
+  g.fillStyle = color;
+  g.beginPath();
+  g.ellipse(0, 0, r, r * 0.52, 0, 0, Math.PI * 2);
+  g.fill();
+  g.strokeStyle = vein;
+  g.lineWidth = Math.max(1, r * 0.16);
+  g.beginPath();
+  g.moveTo(-r * 1.15, 0);
+  g.lineTo(r * 0.75, 0);
+  g.stroke();
+  g.restore();
+}
+
+/**
+ * Draw one tile face (background + glyph) at (0,0) with size w×h. In English, character and wind tiles
+ * also get a small Latin corner index (1–9 / E S W N) as on western sets.
+ */
+function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: number, p: Palette, lang: Lang): void {
   const suit = suitOf(kind);
   const rank = rankOf(kind);
   const rad = w * 0.13;
-  g.fillStyle = suit === 'flower' ? p.faceFlower : suit === 'season' ? p.faceSeason : p.face;
+  const faceColor = suit === 'flower' ? p.faceFlower : suit === 'season' ? p.faceSeason : p.face;
+  g.fillStyle = faceColor;
   roundRect(g, 0, 0, w, h, rad);
   g.fill();
   g.strokeStyle = p.edge;
@@ -334,6 +447,13 @@ function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: numbe
   const iw = w - mx * 2;
   const ih = h - my * 2;
   const colors = [p.green, p.red, p.blue];
+  const cornerIndex = (text: string, color: string) => {
+    g.fillStyle = color;
+    g.font = `700 ${Math.max(7, Math.round(w * 0.22))}px ${LATIN_FONT}`;
+    g.textAlign = 'left';
+    g.textBaseline = 'top';
+    g.fillText(text, w * 0.08, h * 0.05);
+  };
 
   if (suit === 'dot') {
     const cells = DOT_GRID[rank];
@@ -346,7 +466,7 @@ function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: numbe
       g.beginPath();
       g.arc(cx, cy, r, 0, Math.PI * 2);
       g.fill();
-      g.fillStyle = p.face;
+      g.fillStyle = faceColor;
       g.beginPath();
       g.arc(cx, cy, r * 0.62, 0, Math.PI * 2);
       g.fill();
@@ -363,7 +483,7 @@ function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: numbe
         g.beginPath();
         g.arc(cx, cy, r, 0, Math.PI * 2);
         g.fill();
-        g.fillStyle = p.face;
+        g.fillStyle = faceColor;
         g.beginPath();
         g.arc(cx, cy, r * 0.42, 0, Math.PI * 2);
         g.fill();
@@ -383,7 +503,7 @@ function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: numbe
       g.fillStyle = p.green;
       roundRect(g, x, y, sw, sh, sw / 2);
       g.fill();
-      g.fillStyle = p.face;
+      g.fillStyle = faceColor;
       g.fillRect(x, y + sh * 0.33, sw, Math.max(1, sh * 0.05));
       g.fillRect(x, y + sh * 0.66, sw, Math.max(1, sh * 0.05));
       g.fillStyle = p.red;
@@ -402,7 +522,7 @@ function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: numbe
         g.fillStyle = rank >= 5 && i % 3 === 1 ? p.red : i % 3 === 2 && rank >= 7 ? p.blue : p.green;
         roundRect(g, x, y, sw, sh, sw / 2);
         g.fill();
-        g.fillStyle = p.face;
+        g.fillStyle = faceColor;
         g.fillRect(x, y + sh * 0.36, sw, Math.max(1, sh * 0.08));
         g.fillRect(x, y + sh * 0.64, sw, Math.max(1, sh * 0.08));
       });
@@ -416,6 +536,7 @@ function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: numbe
     g.fillStyle = p.red;
     g.font = `700 ${Math.round(h * 0.36)}px ${CJK_FONT}`;
     g.fillText('萬', w / 2, h * 0.7);
+    if (lang === 'en') cornerIndex(String(rank), p.blue);
   } else if (suit === 'dragon' && rank === 2) {
     // white dragon: a hollow blue frame
     const lw = Math.max(2, w * 0.07);
@@ -442,16 +563,15 @@ function drawFace(g: CanvasRenderingContext2D, kind: number, w: number, h: numbe
       ch = SEASONS[rank];
       color = p.orange;
     }
+    const bonus = suit === 'flower' || suit === 'season';
     g.fillStyle = color;
-    g.font = `700 ${Math.round(w * 0.62)}px ${CJK_FONT}`;
-    g.fillText(ch, w / 2, h * 0.52);
-    if (suit === 'flower' || suit === 'season') {
-      // small corner tag so the group is recognisable at a glance
-      g.font = `600 ${Math.max(7, Math.round(w * 0.2))}px ${CJK_FONT}`;
-      g.textAlign = 'left';
-      g.textBaseline = 'top';
-      g.fillText(suit === 'flower' ? '花' : '季', w * 0.1, h * 0.06);
-    }
+    g.font = `700 ${Math.round(w * (bonus ? 0.58 : 0.62))}px ${CJK_FONT}`;
+    g.fillText(ch, w / 2, h * (bonus ? 0.58 : 0.52));
+    if (suit === 'wind' && lang === 'en') cornerIndex(WIND_INDEX[rank], p.ink);
+    // language-neutral corner mark so the matching group is recognisable at a glance
+    const r = w * 0.13;
+    if (suit === 'flower') drawBlossom(g, w * 0.22, h * 0.17, r, p.magenta, faceColor);
+    else if (suit === 'season') drawLeaf(g, w * 0.22, h * 0.17, r, p.orange, faceColor);
   }
 }
 
@@ -471,11 +591,27 @@ interface Particle {
   size: number;
 }
 
-const MODE_KEYS: Record<LayoutId, { mode: string; layout: string; desc: string }> = {
-  small: { mode: 'modeSmall', layout: 'layoutSmall', desc: 'descSmall' },
-  medium: { mode: 'modeMedium', layout: 'layoutMedium', desc: 'descMedium' },
-  large: { mode: 'modeLarge', layout: 'layoutLarge', desc: 'descLarge' },
+const MODE_KEYS: Record<LayoutId, { mode: string; layout: string }> = {
+  small: { mode: 'modeSmall', layout: 'layoutSmall' },
+  medium: { mode: 'modeMedium', layout: 'layoutMedium' },
+  large: { mode: 'modeLarge', layout: 'layoutLarge' },
 };
+const BOARD_DESC: Record<BoardId, string> = {
+  small: 'descSmall',
+  medium: 'descMedium',
+  large: 'descLargePortrait',
+  largeClassic: 'descLarge',
+};
+
+/** Landscape-shaped play areas put the HUD in a side column instead of a bottom bar. */
+function sideHud(rootW: number, rootH: number): boolean {
+  return rootW > rootH * 1.15;
+}
+
+/** Any modal on screen (ours, or the shell's rules / settings sheet), ignoring ones that are closing. */
+function modalShowing(): boolean {
+  return document.querySelector('.modal-backdrop:not(.closing)') !== null;
+}
 
 function create(ctx: GameContext): GameInstance {
   const { root, t } = ctx;
@@ -486,6 +622,7 @@ function create(ctx: GameContext): GameInstance {
 
   // game state
   let screen: 'start' | 'game' = 'start';
+  let boardId: BoardId = mode;
   let tiles: Tile[] = [];
   let solution: [number, number][] = [];
   let totalTiles = 0;
@@ -502,6 +639,7 @@ function create(ctx: GameContext): GameInstance {
   let elapsed = 0;
   let lastNow = 0;
   let finished = false;
+  /** One of OUR modals is up. Cleared by its buttons, or by `paused()` if it was dismissed otherwise. */
   let modalOpen = false;
   let lastShownSecond = -1;
 
@@ -509,24 +647,39 @@ function create(ctx: GameContext): GameInstance {
   let metrics: Metrics | null = null;
   let dirty = true;
   const faceCache = new Map<number, HTMLCanvasElement>();
+  let shadowSprite: { c: HTMLCanvasElement; pad: number } | null = null;
   const removeAnims: RemoveAnim[] = [];
   const particles: Particle[] = [];
   let shake: { tile: Tile; t: number } | null = null;
-  let flash = 0; // shuffle fade-in
+  let flash = 0; // shuffle / deal fade-in
   let timers: number[] = [];
 
   let cv: ReturnType<typeof createCanvas> | null = null;
   let offPointer: (() => void) | null = null;
-  let hud: { tiles: HTMLElement; pairs: HTMLElement; time: HTMLElement; shuffleBtn: HTMLButtonElement; hintBtn: HTMLButtonElement } | null = null;
+  let screenEl: HTMLElement | null = null;
+  let hud: { tiles: HTMLElement; pairs: HTMLElement; shuffles: HTMLElement; time: HTMLElement } | null = null;
+  let headerOff: (() => void)[] = [];
+  let headerNarrow = false;
+  let refreshStart: (() => void) | null = null;
+  let legendTiles: { c: HTMLCanvasElement; kind: number }[] = [];
 
   const loop = createLoop((_dt, now) => tick(now));
 
-  const removeUndo = ctx.addHeaderAction({ icon: '↶', label: t('undo'), onClick: () => undo() });
-  const removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: () => requestRestart() });
+  const narrow = () => (root.clientWidth || window.innerWidth) < NARROW_W;
+  const onWindowResize = () => {
+    if (screen === 'start') {
+      refreshStart?.();
+      return;
+    }
+    screenEl?.classList.toggle('mj-side', sideHud(root.clientWidth, root.clientHeight));
+    screenEl?.classList.toggle('mj-narrow', narrow());
+    mountHeader();
+  };
+  window.addEventListener('resize', onWindowResize);
 
   ctx.onDestroy(() => {
-    removeUndo();
-    removeRestart();
+    window.removeEventListener('resize', onWindowResize);
+    unmountHeader();
     teardownGame();
   });
   ctx.onVisibility((visible) => {
@@ -542,7 +695,9 @@ function create(ctx: GameContext): GameInstance {
   ctx.onThemeChange((theme) => {
     pal = makePalette(theme, ctx.cssVar);
     faceCache.clear();
+    shadowSprite = null;
     dirty = true;
+    drawLegend();
     if (screen === 'game' && !loop.running) draw();
   });
 
@@ -554,6 +709,16 @@ function create(ctx: GameContext): GameInstance {
     timers.push(id);
   }
 
+  /**
+   * Input and the clock are paused while any modal is up — ours, or the shell's rules / settings sheet.
+   * Also self-heals `modalOpen` when one of our modals was dismissed without a button (backdrop tap).
+   */
+  function paused(): boolean {
+    const showing = modalShowing();
+    if (modalOpen && !showing) modalOpen = false;
+    return modalOpen || showing;
+  }
+
   function teardownGame(): void {
     loop.stop();
     offPointer?.();
@@ -561,33 +726,72 @@ function create(ctx: GameContext): GameInstance {
     cv?.destroy();
     cv = null;
     hud = null;
+    screenEl = null;
     for (const id of timers) clearTimeout(id);
     timers = [];
     removeAnims.length = 0;
     particles.length = 0;
     shake = null;
     faceCache.clear();
+    shadowSprite = null;
+  }
+
+  // Header actions exist only while a board is on screen (the start screen has nothing to undo / restart).
+  // On narrow screens 🔀 lives in the HUD (the shuffle counter is a button there) to leave room for the title.
+  function mountHeader(): void {
+    const n = narrow();
+    if (headerOff.length && n === headerNarrow) return;
+    unmountHeader();
+    headerNarrow = n;
+    headerOff = [ctx.addHeaderAction({ icon: '💡', label: t('hintBtn', { n: HINT_PENALTY }), onClick: () => hint() })];
+    if (!n) headerOff.push(ctx.addHeaderAction({ icon: '🔀', label: t('shuffleBtn', { n: SHUFFLE_PENALTY }), onClick: () => shuffle() }));
+    headerOff.push(
+      ctx.addHeaderAction({ icon: '↶', label: t('undo'), onClick: () => undo() }),
+      ctx.addHeaderAction({ icon: '↻', label: t('newDeal'), onClick: () => requestRestart() }),
+    );
+  }
+
+  function unmountHeader(): void {
+    for (const off of headerOff) off();
+    headerOff = [];
+  }
+
+  /** The board the current screen shape gets for `m` (same estimate on the start screen and at deal time). */
+  function boardForScreen(m: LayoutId): BoardId {
+    const w = root.clientWidth || window.innerWidth;
+    const h = root.clientHeight || window.innerHeight;
+    const side = sideHud(w, h);
+    return boardFor(m, side ? w - BAR_W : w, side ? h : h - BAR_H, BOARD_PAD);
   }
 
   // ── Start screen ───────────────────────────────────────────────────────
   function showStart(): void {
     teardownGame();
+    unmountHeader();
     screen = 'start';
     finished = true;
+    modalOpen = false;
     ctx.setStatus('');
     root.innerHTML = '';
-    const desc = el('p', { class: 'muted small', text: t(MODE_KEYS[mode].desc) });
+    const desc = el('p', { class: 'muted small' });
     const bestLine = el('p', { class: 'muted small' });
-    const updateBest = () => {
-      const b = ctx.storage.getBest(mode);
-      const clears = ctx.storage.get<Record<string, number>>('clears', {})[mode] ?? 0;
+    refreshStart = () => {
+      const id = boardForScreen(mode);
+      desc.textContent = t(BOARD_DESC[id]);
+      const b = ctx.storage.getBest(id);
+      const clears = ctx.storage.get<Record<string, number>>('clears', {})[id] ?? 0;
       bestLine.textContent = b === null ? t('noBest') : t('bestLine', { time: formatTime(b), n: clears });
     };
-    updateBest();
+    const legendItem = (kind: number, label: string) => {
+      const c = el('canvas', { class: 'mj-legend-tile', width: '1', height: '1' });
+      legendTiles.push({ c, kind });
+      return el('span', { class: 'mj-legend-item' }, c, el('span', { text: label }));
+    };
+    legendTiles = [];
     root.append(
       el(
         'div',
-        { class: 'start-screen' },
+        { class: 'start-screen mj-start' },
         el('div', { class: 'big-icon', text: '🀄' }),
         el('h2', { text: t('chooseLayout') }),
         el('p', { class: 'muted', text: t('desc') }),
@@ -601,8 +805,7 @@ function create(ctx: GameContext): GameInstance {
           (m) => {
             mode = m;
             ctx.storage.set('mode', m);
-            desc.textContent = t(MODE_KEYS[m].desc);
-            updateBest();
+            refreshStart?.();
           },
         ),
         desc,
@@ -615,17 +818,45 @@ function create(ctx: GameContext): GameInstance {
             ctx.storage.set('dim', v);
           }),
         ),
-        el('div', { class: 'mj-legend' }, el('span', { text: '🌸 ' + t('legendFlower') }), el('span', { text: '🍂 ' + t('legendSeason') })),
+        el('div', { class: 'mj-legend' }, legendItem(34, t('legendFlower')), legendItem(38, t('legendSeason'))),
         button(t('play'), () => startGame(), { variant: 'primary', size: 'lg' }),
       ),
     );
+    refreshStart();
+    drawLegend();
+  }
+
+  /** The two little sample tiles (梅 / 春) in the start-screen legend. */
+  function drawLegend(): void {
+    const W = 26;
+    const H = Math.round(W * 1.2);
+    const lift = 3;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    for (const { c, kind } of legendTiles) {
+      if (!c.isConnected) continue;
+      c.width = Math.ceil((W + lift) * dpr);
+      c.height = Math.ceil((H + lift) * dpr);
+      c.style.width = `${W + lift}px`;
+      c.style.height = `${H + lift}px`;
+      const g = c.getContext('2d');
+      if (!g) continue;
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = pal.side;
+      roundRect(g, lift, lift, W, H, W * 0.13);
+      g.fill();
+      drawFace(g, kind, W, H, pal, ctx.lang);
+    }
   }
 
   // ── Game screen ────────────────────────────────────────────────────────
   function startGame(): void {
     teardownGame();
+    mountHeader();
     screen = 'game';
-    const positions = LAYOUTS[mode];
+    refreshStart = null;
+    legendTiles = [];
+    boardId = boardForScreen(mode);
+    const positions = BOARDS[boardId];
     const board = generateBoard(positions);
     tiles = board.tiles;
     solution = board.solution;
@@ -653,21 +884,27 @@ function create(ctx: GameContext): GameInstance {
     const sTiles = stat(t('tilesLeft'));
     const sPairs = stat(t('pairsLeft'));
     const sTime = stat(t('time'));
-    const hintBtn = button(t('hintBtn'), () => hint(), { variant: 'secondary', icon: '💡' });
-    const shuffleBtn = button(t('shuffleBtn', { n: shufflesLeft }), () => shuffle(), { variant: 'secondary', icon: '🔀' });
-    const bar = el(
-      'div',
-      { class: 'mj-bar' },
-      el('div', { class: 'mj-stats' }, sTiles.node, sPairs.node, sTime.node),
-      el('div', { class: 'mj-actions' }, hintBtn, shuffleBtn),
+    // The shuffle counter doubles as the shuffle button on narrow screens (inert otherwise, see style.css).
+    const shuffleValue = el('div', { class: 'mj-stat-value', text: '0' });
+    const shuffleStat = el(
+      'button',
+      { class: 'mj-stat mj-stat-btn', type: 'button', 'aria-label': t('shuffleBtn', { n: SHUFFLE_PENALTY }), onClick: () => narrow() && shuffle() },
+      el('div', { class: 'mj-stat-label' }, el('span', { class: 'mj-stat-icon', text: '🔀 ' }), t('shufflesLeft')),
+      shuffleValue,
     );
-    root.append(area, bar);
-    hud = { tiles: sTiles.value, pairs: sPairs.value, time: sTime.value, shuffleBtn, hintBtn };
+    const bar = el('div', { class: 'mj-bar' }, sTiles.node, sPairs.node, shuffleStat, sTime.node);
+    const cls = ['mj-screen'];
+    if (sideHud(root.clientWidth, root.clientHeight)) cls.push('mj-side');
+    if (narrow()) cls.push('mj-narrow');
+    screenEl = el('div', { class: cls.join(' ') }, area, bar);
+    root.append(screenEl);
+    hud = { tiles: sTiles.value, pairs: sPairs.value, shuffles: shuffleValue, time: sTime.value };
 
     const bounds = layoutBounds(positions);
     cv = createCanvas(area, (w, h) => {
-      metrics = computeMetrics(bounds, w, h, 6);
+      metrics = computeMetrics(bounds, w, h, BOARD_PAD);
       faceCache.clear();
+      shadowSprite = null;
       dirty = true;
     });
     offPointer = onPointer(cv.canvas, {
@@ -692,7 +929,7 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function updateStatus(): void {
-    ctx.setStatus(t('status', { layout: t(MODE_KEYS[mode].layout), n: shufflesLeft }));
+    ctx.setStatus(t(MODE_KEYS[mode].layout));
   }
 
   function updateHud(): void {
@@ -700,10 +937,8 @@ function create(ctx: GameContext): GameInstance {
     hud.tiles.textContent = String(tiles.length);
     hud.pairs.textContent = String(pairs);
     hud.pairs.classList.toggle('mj-warn', pairs <= 1 && tiles.length > 0);
-    const label = hud.shuffleBtn.lastElementChild;
-    if (label) label.textContent = t('shuffleBtn', { n: shufflesLeft });
-    hud.shuffleBtn.disabled = shufflesLeft <= 0 || finished;
-    hud.hintBtn.disabled = finished;
+    hud.shuffles.textContent = `${shufflesLeft}/${MAX_SHUFFLES}`;
+    hud.shuffles.classList.toggle('mj-spent', shufflesLeft <= 0);
     updateTime(true);
   }
 
@@ -718,7 +953,7 @@ function create(ctx: GameContext): GameInstance {
 
   // ── Interaction ────────────────────────────────────────────────────────
   function handleTap(px: number, py: number): void {
-    if (screen !== 'game' || finished || !metrics || modalOpen) return;
+    if (screen !== 'game' || finished || !metrics || paused()) return;
     const tile = hitTestTolerant(tiles, px, py, metrics, 6);
     if (!tile) {
       if (selected) {
@@ -765,7 +1000,7 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function undo(): void {
-    if (screen !== 'game' || finished || modalOpen) return;
+    if (screen !== 'game' || finished || paused()) return;
     const last = history.pop();
     if (!last) {
       ctx.toast(t('nothingToUndo'));
@@ -780,7 +1015,7 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function hint(): void {
-    if (screen !== 'game' || finished || modalOpen) return;
+    if (screen !== 'game' || finished || paused()) return;
     const pair = pickHint(tiles);
     if (!pair) {
       showNoMoves();
@@ -798,15 +1033,25 @@ function create(ctx: GameContext): GameInstance {
     updateTime(true);
   }
 
-  function shuffle(): void {
-    if (screen !== 'game' || finished || modalOpen) return;
+  /**
+   * Re-deal the remaining tiles. `pre` is a re-deal already computed by the no-moves dialog. When no
+   * re-deal can help (the remaining positions cannot be cleared in any order) nothing is charged.
+   */
+  function shuffle(pre?: Board): void {
+    if (screen !== 'game' || finished || paused()) return;
     if (shufflesLeft <= 0) {
       ctx.toast(t('noShuffles'));
       ctx.play('error');
       return;
     }
     if (tiles.length < 2) return;
-    const res = reshuffle(tiles);
+    const res = pre ?? reshuffle(tiles);
+    if (!res) {
+      ctx.toast(t('shuffleUseless'));
+      ctx.play('error');
+      ctx.haptic('error');
+      return;
+    }
     tiles = res.tiles;
     solution = res.solution;
     shufflesLeft--;
@@ -821,7 +1066,6 @@ function create(ctx: GameContext): GameInstance {
     ctx.toast(t('shufflePenalty', { n: SHUFFLE_PENALTY }));
     recompute();
     updateHud();
-    updateStatus();
     checkState();
   }
 
@@ -834,25 +1078,32 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function showNoMoves(): void {
-    if (modalOpen || finished || screen !== 'game' || tiles.length === 0 || pairs > 0) return;
+    if (finished || screen !== 'game' || tiles.length === 0 || pairs > 0) return;
+    if (paused()) {
+      // another sheet (e.g. the rules) is up: show the dialog once it has been closed
+      later(() => showNoMoves(), 400);
+      return;
+    }
+    // Work out up front whether a shuffle can help, so it is never offered (or charged) in vain.
+    const redeal = shufflesLeft > 0 ? reshuffle(tiles) : null;
     modalOpen = true;
     ctx.play('lose');
     ctx.haptic('heavy');
-    const buttons = [];
-    if (shufflesLeft > 0) {
+    const buttons: ModalButton[] = [];
+    if (redeal) {
       buttons.push({
         label: t('shuffleAction', { n: shufflesLeft }),
         primary: true,
         onClick: () => {
           modalOpen = false;
-          shuffle();
+          shuffle(redeal);
         },
       });
     }
     if (history.length) {
       buttons.push({
         label: t('undo'),
-        primary: shufflesLeft <= 0,
+        primary: !redeal,
         onClick: () => {
           modalOpen = false;
           undo();
@@ -860,27 +1111,42 @@ function create(ctx: GameContext): GameInstance {
       });
     }
     buttons.push({
-      label: t('restart'),
+      label: t('newDeal'),
+      primary: !redeal && !history.length,
       onClick: () => {
         modalOpen = false;
         startGame();
       },
     });
     if (buttons.length < 3) buttons.unshift({ label: t('home'), onClick: () => ctx.exit() });
-    ctx.showModal({
-      title: t('noMoves'),
-      body: shufflesLeft > 0 ? t('noMovesBody', { n: tiles.length, p: SHUFFLE_PENALTY }) : t('noMovesNoShuffle', { n: tiles.length }),
-      dismissible: false,
-      buttons,
-    });
+    const body = redeal
+      ? t('noMovesBody', { n: tiles.length, p: SHUFFLE_PENALTY })
+      : shufflesLeft > 0
+        ? t('noMovesStuck', { n: tiles.length })
+        : t('noMovesNoShuffle', { n: tiles.length });
+    ctx.showModal({ title: t('noMoves'), body, dismissible: false, buttons });
+  }
+
+  /** A ghost "choose another layout" link for modal bodies; closes `getHandle()` and opens the start screen. */
+  function changeLayoutLink(getHandle: () => ModalHandle | null): HTMLButtonElement {
+    return button(
+      t('changeLayout'),
+      () => {
+        getHandle()?.close();
+        modalOpen = false;
+        showStart();
+      },
+      { variant: 'ghost', icon: '🀄', class: 'mj-link' },
+    );
   }
 
   function finishWin(): void {
     finished = true;
+    selected = null;
     const total = Math.floor(elapsed + penalty);
-    const isBest = ctx.storage.recordBest(mode, total, 'lower');
+    const isBest = ctx.storage.recordBest(boardId, total, 'lower');
     const clears = ctx.storage.get<Record<string, number>>('clears', {});
-    clears[mode] = (clears[mode] ?? 0) + 1;
+    clears[boardId] = (clears[boardId] ?? 0) + 1;
     ctx.storage.set('clears', clears);
     updateHud();
     ctx.play('win');
@@ -888,7 +1154,8 @@ function create(ctx: GameContext): GameInstance {
     spawnParticles();
     later(() => {
       modalOpen = true;
-      const best = ctx.storage.getBest(mode);
+      const best = ctx.storage.getBest(boardId);
+      let handle: ModalHandle | null = null;
       const body = el(
         'div',
         { class: 'mj-result' },
@@ -899,8 +1166,9 @@ function create(ctx: GameContext): GameInstance {
           ? el('p', { class: 'muted small', text: t('penalties', { h: hintsUsed, s: shufflesUsed, p: hintsUsed * HINT_PENALTY + shufflesUsed * SHUFFLE_PENALTY }) })
           : null,
         isBest ? el('p', { text: '🏆 ' + t('newBest') }) : best !== null ? el('p', { class: 'muted small', text: t('bestTime', { time: formatTime(best) }) }) : null,
+        changeLayoutLink(() => handle),
       );
-      ctx.showModal({
+      handle = ctx.showModal({
         title: t('congratulations'),
         body,
         dismissible: false,
@@ -919,16 +1187,21 @@ function create(ctx: GameContext): GameInstance {
     }, 900);
   }
 
+  /** ↻: deal a new board of the same layout (after confirming), or go back to the layout chooser. */
   function requestRestart(): void {
-    if (screen !== 'game' || modalOpen) return;
-    if (finished || history.length === 0) {
-      showStart();
+    if (screen !== 'game' || paused()) return;
+    if (finished) {
+      startGame();
       return;
     }
+    const progress = history.length > 0 || hintsUsed > 0 || shufflesUsed > 0;
+    let handle: ModalHandle | null = null;
+    const body = el('div', { class: 'mj-result' }, el('p', { text: t(progress ? 'restartConfirm' : 'restartFresh') }), changeLayoutLink(() => handle));
     modalOpen = true;
-    ctx.showModal({
-      title: t('restart'),
-      body: t('restartConfirm'),
+    // Dismissible: tapping the backdrop cancels; `paused()` notices the closed sheet and resumes play.
+    handle = ctx.showModal({
+      title: t('newDeal'),
+      body,
       buttons: [
         {
           label: t('cancel'),
@@ -937,11 +1210,11 @@ function create(ctx: GameContext): GameInstance {
           },
         },
         {
-          label: t('confirm'),
+          label: t('newDeal'),
           primary: true,
           onClick: () => {
             modalOpen = false;
-            showStart();
+            startGame();
           },
         },
       ],
@@ -973,7 +1246,7 @@ function create(ctx: GameContext): GameInstance {
   function tick(now: number): void {
     const dt = Math.min(1, Math.max(0, (now - lastNow) / 1000));
     lastNow = now;
-    if (!finished && !modalOpen) {
+    if (!finished && !paused()) {
       elapsed += dt;
       updateTime();
     }
@@ -1021,10 +1294,33 @@ function create(ctx: GameContext): GameInstance {
     const g = c.getContext('2d');
     if (g) {
       g.scale(dpr, dpr);
-      drawFace(g, kind, metrics.w, metrics.h, pal);
+      drawFace(g, kind, metrics.w, metrics.h, pal, ctx.lang);
     }
     faceCache.set(kind, c);
     return c;
+  }
+
+  /** Soft drop shadow (pre-blurred once per size / theme) cast by raised tiles onto the layer below. */
+  function shadow(): { c: HTMLCanvasElement; pad: number } {
+    if (shadowSprite || !metrics || !cv) return shadowSprite ?? { c: document.createElement('canvas'), pad: 0 };
+    const m = metrics;
+    const dpr = cv.dpr;
+    const blur = Math.max(2, m.lift * 1.1);
+    const pad = blur * 2;
+    const c = document.createElement('canvas');
+    c.width = Math.ceil((m.w + pad * 2) * dpr);
+    c.height = Math.ceil((m.h + pad * 2) * dpr);
+    const g = c.getContext('2d');
+    if (g) {
+      g.scale(dpr, dpr);
+      g.shadowColor = pal.shadow;
+      g.shadowBlur = blur * dpr;
+      g.fillStyle = pal.shadow;
+      roundRect(g, pad, pad, m.w, m.h, m.w * 0.13);
+      g.fill();
+    }
+    shadowSprite = { c, pad };
+    return shadowSprite;
   }
 
   function draw(now = performance.now()): void {
@@ -1036,18 +1332,23 @@ function create(ctx: GameContext): GameInstance {
     const H = cv.height;
     g.clearRect(0, 0, W, H);
     const rad = m.w * 0.13;
-    // table panel behind the board
-    const pad = Math.max(6, m.w * 0.18);
+    // Table panel behind the board, kept inside the canvas so its rounded corners are never clipped.
+    const want = Math.max(6, m.w * 0.18);
+    const padX = Math.max(1, Math.min(want, m.ox - 1));
+    const padY = Math.max(1, Math.min(want, m.oy - 1));
     g.fillStyle = pal.table;
-    roundRect(g, m.ox - pad, m.oy - pad, W - 2 * m.ox + 2 * pad, H - 2 * m.oy + 2 * pad, pad * 1.4);
+    roundRect(g, m.ox - padX, m.oy - padY, W - 2 * m.ox + 2 * padX, H - 2 * m.oy + 2 * padY, Math.min(padX, padY) * 1.6);
     g.fill();
     const ordered = drawOrder(tiles);
     const alpha = flash > 0 ? 0.2 + 0.8 * (1 - flash / 0.45) : 1;
+    const sh = shadow();
+    const shOff = m.lift * 1.25;
     g.globalAlpha = alpha;
     for (const tile of ordered) {
       const r = tileRect(tile, m);
       let dx = 0;
       if (shake && shake.tile === tile) dx = Math.sin(shake.t * 55) * 3 * (1 - shake.t / 0.35);
+      if (tile.z > 0) g.drawImage(sh.c, r.x + dx + shOff - sh.pad, r.y + shOff - sh.pad, m.w + sh.pad * 2, m.h + sh.pad * 2);
       g.fillStyle = pal.side;
       roundRect(g, r.x + dx + m.lift, r.y + m.lift, r.w, r.h, rad);
       g.fill();
@@ -1118,6 +1419,17 @@ function create(ctx: GameContext): GameInstance {
       solution: () => solution.slice(),
       pairs: () => pairs,
       elapsed: () => elapsed + penalty,
+      board: () => boardId,
+      modalOpen: () => modalOpen,
+      shufflesLeft: () => shufflesLeft,
+      setTiles: (next: Tile[]) => {
+        tiles = next.map((x) => ({ ...x }));
+        history = [];
+        selected = null;
+        recompute();
+        updateHud();
+        checkState();
+      },
     };
     ctx.onDestroy(() => {
       delete w.__mj;
@@ -1127,6 +1439,7 @@ function create(ctx: GameContext): GameInstance {
   showStart();
   return {
     destroy() {
+      unmountHeader();
       teardownGame();
     },
   };

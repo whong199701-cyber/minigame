@@ -18,13 +18,26 @@ import {
   minRotations,
   mulberry32,
   neighbour,
+  nextMode,
   opposite,
+  parseSave,
   period,
+  rebuildPuzzle,
   rotCW,
   rotateTimes,
   scramble,
+  sourceIndex,
   spanningTree,
+  clampOffset,
+  zoomOffset,
+  undoTarget,
+  toggleLockAt,
+  parVerdict,
+  makeThrottle,
+  storedZoom,
+  SAVE_VERSION,
   type Puzzle,
+  type SaveData,
 } from './logic';
 
 /** Bring every tile of a puzzle into its solved orientation by applying the minimal clockwise rotations. */
@@ -353,5 +366,232 @@ describe('isModeId', () => {
     expect(isModeId('expert')).toBe(true);
     expect(isModeId('nope')).toBe(false);
     expect(isModeId(3)).toBe(false);
+  });
+});
+
+describe('modes', () => {
+  it('match the brief: 5, 7, 9, 11 with wrap only on expert', () => {
+    expect(MODES.easy).toMatchObject({ size: 5, wrap: false });
+    expect(MODES.medium).toMatchObject({ size: 7, wrap: false });
+    expect(MODES.hard).toMatchObject({ size: 9, wrap: false });
+    expect(MODES.expert).toMatchObject({ size: 11, wrap: true });
+  });
+  it('steps to the next bigger mode', () => {
+    expect(nextMode('easy')).toBe('medium');
+    expect(nextMode('medium')).toBe('hard');
+    expect(nextMode('hard')).toBe('expert');
+    expect(nextMode('expert')).toBeNull();
+  });
+  it('places the source in the centre', () => {
+    expect(sourceIndex(5)).toBe(12);
+    expect(sourceIndex(11)).toBe(60);
+  });
+  it('generates every expert puzzle deducibly within the attempt budget', () => {
+    const rand = mulberry32(4242);
+    for (let k = 0; k < 8; k++) expect(generatePuzzle(MODES.expert, rand).deducible).toBe(true);
+  });
+});
+
+describe('rebuildPuzzle', () => {
+  it('recreates par and source from stored arrays', () => {
+    const p = generatePuzzle(MODES.hard, mulberry32(17));
+    const q = rebuildPuzzle(MODES.hard, Array.from(p.solution), Array.from(p.tiles));
+    expect(q.par).toBe(p.par);
+    expect(q.source).toBe(p.source);
+    expect(q.tiles).toEqual(p.tiles);
+    expect(q.solution).toEqual(p.solution);
+    expect(q.deducible).toBe(true);
+  });
+});
+
+describe('parseSave', () => {
+  const p = generatePuzzle(MODES.easy, mulberry32(21));
+  const good = (): SaveData => ({
+    v: SAVE_VERSION,
+    mode: 'easy',
+    solution: Array.from(p.solution),
+    start: Array.from(p.tiles),
+    tiles: Array.from(p.tiles).map((m, i) => (i % 3 === 0 ? rotCW(m) : m)),
+    locked: Array.from(p.tiles, (_, i) => (i === 4 ? 1 : 0)),
+    hinted: Array.from(p.tiles, () => 0),
+    rotations: 9,
+    hints: 1,
+    elapsedMs: 12345,
+  });
+  it('accepts a valid save and returns a copy', () => {
+    const raw = good();
+    const s = parseSave(JSON.parse(JSON.stringify(raw)));
+    expect(s).not.toBeNull();
+    expect(s!.tiles).toEqual(raw.tiles);
+    expect(s!.rotations).toBe(9);
+    expect(s!.tiles).not.toBe(raw.tiles);
+  });
+  it('rejects garbage and wrong versions', () => {
+    expect(parseSave(null)).toBeNull();
+    expect(parseSave('save')).toBeNull();
+    expect(parseSave({ ...good(), v: 99 })).toBeNull();
+    expect(parseSave({ ...good(), mode: 'insane' })).toBeNull();
+  });
+  it('rejects arrays of the wrong length or with out-of-range values', () => {
+    expect(parseSave({ ...good(), tiles: good().tiles.slice(1) })).toBeNull();
+    expect(parseSave({ ...good(), mode: 'medium' })).toBeNull(); // 25 tiles cannot be a 7x7 board
+    const bad = good();
+    bad.tiles[0] = 16;
+    expect(parseSave(bad)).toBeNull();
+    const bad2 = good();
+    bad2.locked[0] = 2;
+    expect(parseSave(bad2)).toBeNull();
+  });
+  it('rejects tiles whose shape does not match the solution', () => {
+    const bad = good();
+    const i = bad.solution.findIndex((m) => degree(m) === 1);
+    bad.tiles[i] = UP | DOWN;
+    expect(parseSave(bad)).toBeNull();
+  });
+  it('rejects an invalid solution and bad counters', () => {
+    const bad = good();
+    const i = bad.solution.findIndex((m) => period(m) === 4);
+    bad.solution[i] = rotCW(bad.solution[i]); // same shape, but the network now has a dangling connector
+    expect(parseSave(bad)).toBeNull();
+    expect(parseSave({ ...good(), rotations: -1 })).toBeNull();
+    expect(parseSave({ ...good(), hints: 1.5 })).toBeNull();
+    expect(parseSave({ ...good(), elapsedMs: Number.NaN })).toBeNull();
+    expect(parseSave({ ...good(), elapsedMs: -5 })).toBeNull();
+  });
+});
+
+describe('board view math', () => {
+  it('centres a board that fits', () => {
+    expect(clampOffset(-500, 300, 400, 8)).toBe(50);
+    expect(clampOffset(123, 384, 400, 8)).toBe(8);
+  });
+  it('clamps a zoomed board so it always covers the viewport', () => {
+    // board 600 px in a 400 px viewport with an 8 px margin: offset in [-208, 8]
+    expect(clampOffset(50, 600, 400, 8)).toBe(8);
+    expect(clampOffset(-1000, 600, 400, 8)).toBe(-208);
+    expect(clampOffset(-100, 600, 400, 8)).toBe(-100);
+  });
+  it('keeps the point under the fingers fixed while zooming', () => {
+    const offset = 10;
+    const cell = 30;
+    const focal = 160; // board coordinate (160 - 10) / 30 = 5 cells
+    const next = zoomOffset(offset, focal, cell, 45);
+    expect((focal - next) / 45).toBeCloseTo(5);
+    expect(zoomOffset(offset, focal, cell, cell)).toBe(offset);
+    expect(zoomOffset(offset, focal, 0, 10)).toBe(offset);
+  });
+});
+
+describe('undoTarget', () => {
+  it('undoes the most recent turn when its tile is free', () => {
+    const locked = new Uint8Array(9);
+    expect(undoTarget([3, 5, 7], locked)).toBe(2);
+    expect(undoTarget([], locked)).toBe(-1);
+  });
+  it('skips turns on tiles locked afterwards instead of getting stuck', () => {
+    // QA round 1: tap tile 7, long-press tile 7 to lock it, press undo -> the older turn on tile 5 is undone.
+    const locked = new Uint8Array(9);
+    locked[7] = 1;
+    expect(undoTarget([3, 5, 7], locked)).toBe(1);
+    expect(undoTarget([3, 7, 7], locked)).toBe(0);
+  });
+  it('returns -1 when every remaining turn is on a locked tile', () => {
+    const locked = new Uint8Array(9);
+    locked[3] = 1;
+    locked[7] = 1;
+    expect(undoTarget([3, 7], locked)).toBe(-1);
+  });
+  it('makes a skipped turn undoable again once the tile is unlocked', () => {
+    const locked = new Uint8Array(9);
+    const stack = [2, 4, 6];
+    locked[6] = 1;
+    let k = undoTarget(stack, locked);
+    expect(stack[k]).toBe(4);
+    stack.splice(k, 1);
+    locked[6] = 0;
+    k = undoTarget(stack, locked);
+    expect(stack[k]).toBe(6);
+  });
+});
+
+describe('toggleLockAt', () => {
+  it('locks and unlocks a normal tile', () => {
+    const locked = new Uint8Array(4);
+    const hinted = new Uint8Array(4);
+    expect(toggleLockAt(locked, hinted, 2)).toBe(true);
+    expect(locked[2]).toBe(1);
+    expect(toggleLockAt(locked, hinted, 2)).toBe(true);
+    expect(locked[2]).toBe(0);
+  });
+  it('keeps a tile fixed by a hint locked', () => {
+    const locked = Uint8Array.from([0, 1, 0, 0]);
+    const hinted = Uint8Array.from([0, 1, 0, 0]);
+    expect(toggleLockAt(locked, hinted, 1)).toBe(false);
+    expect(locked[1]).toBe(1);
+  });
+});
+
+describe('parVerdict', () => {
+  it('calls a hint-free game at par perfect and lets it set the turns record', () => {
+    expect(parVerdict(12, 12, 0)).toEqual({ over: 0, perfect: true, turnsRecord: true });
+  });
+  it('reports turns over par', () => {
+    expect(parVerdict(15, 12, 0)).toEqual({ over: 3, perfect: false, turnsRecord: true });
+  });
+  it('never calls a hinted game perfect, even at exactly par (QA round 1: 78 turns, par 78, 39 hints)', () => {
+    expect(parVerdict(78, 78, 39)).toEqual({ over: 0, perfect: false, turnsRecord: false });
+    expect(parVerdict(20, 18, 1)).toEqual({ over: 2, perfect: false, turnsRecord: false });
+  });
+  it('hints apply exactly the minimal turns, so an all-hint solve lands on par', () => {
+    const p = generatePuzzle(MODES.medium, mulberry32(21));
+    const tiles = p.tiles.slice();
+    let turns = 0;
+    let hints = 0;
+    for (let h = hintTile(p, tiles); h >= 0; h = hintTile(p, tiles)) {
+      turns += Math.max(1, minRotations(tiles[h], p.solution[h]));
+      tiles[h] = p.solution[h];
+      hints++;
+    }
+    expect(turns).toBe(p.par);
+    expect(parVerdict(turns, p.par, hints).perfect).toBe(false);
+  });
+});
+
+describe('makeThrottle', () => {
+  it('accepts the very first notice even right after page load (QA round 1: dropped at t = 1181 ms)', () => {
+    const gate = makeThrottle(2500);
+    expect(gate(1181)).toBe(true);
+    const gate0 = makeThrottle(2500);
+    expect(gate0(0)).toBe(true);
+  });
+  it('drops repeats inside the gap and accepts them after it', () => {
+    const gate = makeThrottle(2500);
+    expect(gate(1000)).toBe(true);
+    expect(gate(2000)).toBe(false);
+    expect(gate(3499)).toBe(false);
+    expect(gate(3500)).toBe(true);
+  });
+  it('force always shows and restarts the gap', () => {
+    const gate = makeThrottle(2500);
+    expect(gate(1000)).toBe(true);
+    expect(gate(1200, true)).toBe(true);
+    expect(gate(3600)).toBe(false);
+    expect(gate(3700)).toBe(true);
+  });
+});
+
+describe('storedZoom', () => {
+  it('reads a remembered zoom per mode', () => {
+    expect(storedZoom({ expert: 1.6, hard: 1.2 }, 'expert')).toBe(1.6);
+    expect(storedZoom({ expert: 1.6, hard: 1.2 }, 'hard')).toBe(1.2);
+    expect(storedZoom({ expert: 1.6 }, 'easy')).toBe(1);
+  });
+  it('falls back to the whole board for missing or corrupted data', () => {
+    expect(storedZoom(null, 'expert')).toBe(1);
+    expect(storedZoom('x', 'expert')).toBe(1);
+    expect(storedZoom({ expert: 'big' }, 'expert')).toBe(1);
+    expect(storedZoom({ expert: NaN }, 'expert')).toBe(1);
+    expect(storedZoom({ expert: 0.4 }, 'expert')).toBe(1);
+    expect(storedZoom({ expert: 1e9 }, 'expert')).toBe(4);
   });
 });

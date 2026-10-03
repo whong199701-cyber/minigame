@@ -1,23 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AIM_LOCK,
   BALL_E,
   CUSHION_E,
   D,
+  FIRE_MIN,
+  GRAB_MIN_PX,
   H,
   HEAD_Y,
   MODES,
   MODE_LIST,
   POCKETS,
+  PULL_PX,
   R,
   STEP,
   V_MAX,
   W,
   ballsLeft,
+  beginAim,
   findFreeSpot,
+  grabRadiusPx,
   insideTable,
   isAtRest,
   isFreeSpot,
   isStripe,
+  isTap,
+  moveAim,
   nearestObjectAngle,
   newGame,
   placeCueBall,
@@ -26,12 +34,14 @@ import {
   rackBalls,
   rackNumbers,
   rackPositions,
+  releasePower,
   settle,
   shoot,
   speedForPower,
   starsFor,
   stepGame,
   stepPhysics,
+  type AimGesture,
   type Ball,
   type PhysEvent,
 } from './logic';
@@ -493,5 +503,172 @@ describe('aim prediction', () => {
     expect(nearestObjectAngle(balls)).toBeCloseTo(-Math.PI / 2, 5);
     expect(nearestObjectAngle([ball(0, 1, 1)], 0.7)).toBe(0.7);
     expect(HEAD_Y).toBeGreaterThan(H / 2);
+  });
+});
+
+describe('aim gesture', () => {
+  const UP = -Math.PI / 2;
+  const CX = 200;
+  const CY = 500;
+
+  /** Press at (x0, y0), move in `steps` equal steps to (x1, y1) (like pointermove events), return the gesture. */
+  function dragLine(aim: number, scale: number, x0: number, y0: number, x1: number, y1: number, steps = 15): AimGesture {
+    const g = beginAim(CX, CY, x0, y0, aim, grabRadiusPx(scale));
+    for (let i = 1; i <= steps; i++) moveAim(g, CX, CY, x0 + ((x1 - x0) * i) / steps, y0 + ((y1 - y0) * i) / steps);
+    return g;
+  }
+
+  it('grabbing the cue ball anywhere and pulling straight back keeps the aim exactly (QA repro)', () => {
+    for (const scale of [2.5, 3.18, 4.5]) {
+      const r = R * scale;
+      // Side offsets 0.3R..1.5R (the reviewer measured 1.6°..14.4° of drift before the fix) and presses in front/behind.
+      const offsets = [
+        [0.3 * r, 0],
+        [0.6 * r, 0],
+        [0.9 * r, 0],
+        [1.2 * r, 0],
+        [1.5 * r, 0],
+        [-0.9 * r, 0],
+        [0, -1.2 * r],
+        [0, 1.2 * r],
+        [0.7 * r, -0.7 * r],
+      ];
+      for (const [dx, dy] of offsets) {
+        const g = dragLine(UP, scale, CX + dx, CY + dy, CX + dx, CY + dy + 150);
+        expect(g.grab).toBe(true);
+        expect(g.aim).toBe(UP);
+        expect(g.power).toBeCloseTo(1, 6);
+        expect(releasePower(g)).toBeCloseTo(1, 6);
+      }
+    }
+  });
+
+  it('grab: power is the pull along −aim; sideways drift and pushing forward give none', () => {
+    const aim = 0.3;
+    const back = { x: -Math.cos(aim), y: -Math.sin(aim) };
+    const side = { x: -Math.sin(aim), y: Math.cos(aim) };
+    let g = dragLine(aim, 3, CX + 5, CY - 4, CX + 5 + back.x * 75 + side.x * 40, CY - 4 + back.y * 75 + side.y * 40);
+    expect(g.aim).toBe(aim);
+    expect(g.power).toBeCloseTo(75 / PULL_PX, 6);
+    g = dragLine(aim, 3, CX, CY, CX + side.x * 120, CY + side.y * 120);
+    expect(g.power).toBeCloseTo(0, 9);
+    expect(releasePower(g)).toBeNull();
+    g = dragLine(aim, 3, CX, CY, CX - back.x * 60, CY - back.y * 60);
+    expect(g.power).toBe(0);
+    expect(releasePower(g)).toBeNull();
+  });
+
+  it('the grab zone is at least a fingertip wide and grows with the table scale', () => {
+    expect(grabRadiusPx(1)).toBe(GRAB_MIN_PX);
+    expect(grabRadiusPx(3.18)).toBe(GRAB_MIN_PX);
+    expect(grabRadiusPx(6)).toBeCloseTo(R * 6 * 2, 9);
+    expect(beginAim(CX, CY, CX + GRAB_MIN_PX + 1, CY, UP, grabRadiusPx(3)).grab).toBe(false);
+  });
+
+  it('aim-only sideways drags never charge or fire (QA repro: 60 px at 100 px, 80 px at 250 px)', () => {
+    let g = dragLine(UP, 3.18, CX, CY - 100, CX + 60, CY - 100, 12);
+    expect(g.grab).toBe(false);
+    expect(g.power).toBeLessThan(1e-9);
+    expect(g.aim).toBeGreaterThan(UP + 0.3); // the aim did turn (finger in front, moving right → aim swings right)
+    expect(releasePower(g)).toBeNull();
+    g = dragLine(UP, 3.18, CX, CY - 250, CX + 80, CY - 250, 10);
+    expect(g.power).toBeLessThan(1e-9);
+    expect(releasePower(g)).toBeNull();
+    // Even a drag as long as the press distance stays aim-only.
+    g = dragLine(UP, 3.18, CX + 120, CY + 30, CX + 120, CY - 90, 40);
+    expect(g.power).toBeLessThan(1e-9);
+    expect(releasePower(g)).toBeNull();
+  });
+
+  it('circling the cue ball rotates the aim by the swept angle without charging', () => {
+    const g = beginAim(CX, CY, CX, CY + 120, UP, grabRadiusPx(3));
+    const n = 60;
+    for (let i = 1; i <= n; i++) {
+      const a = Math.PI / 2 + (Math.PI / 2) * (i / n); // finger sweeps from below the ball to its left
+      moveAim(g, CX, CY, CX + Math.cos(a) * 120, CY + Math.sin(a) * 120);
+    }
+    expect(g.aim).toBeCloseTo(0, 6); // aim followed: up → right (the cue butt went from below to the left)
+    expect(g.power).toBeLessThan(1e-9);
+  });
+
+  it('pulling away from the cue ball charges without changing the aim, and locks it while charged', () => {
+    const aim = -2;
+    const g = dragLine(aim, 3, CX + 40, CY + 60, CX + 40 * 3, CY + 60 * 3, 20);
+    expect(g.aim).toBe(aim);
+    const pulled = Math.hypot(40 * 3, 60 * 3) - Math.hypot(40, 60);
+    expect(g.power).toBeCloseTo(Math.min(1, pulled / PULL_PX), 6);
+    expect(g.power).toBeGreaterThan(AIM_LOCK);
+    // Sideways drift while charged neither rotates the aim nor changes the charge.
+    const p0 = g.power;
+    for (let i = 1; i <= 10; i++) moveAim(g, CX, CY, CX + 120 + i * 4, CY + 180 - i * 2.6);
+    expect(g.aim).toBe(aim);
+    expect(g.power).toBeCloseTo(p0, 2);
+    expect(releasePower(g)).not.toBeNull();
+  });
+
+  it('rotate first, then pull: the shot keeps the rotated aim', () => {
+    const g = beginAim(CX, CY, CX, CY + 100, UP, grabRadiusPx(3));
+    for (let i = 1; i <= 10; i++) moveAim(g, CX, CY, CX + Math.sin(-0.02 * i) * 100, CY + Math.cos(-0.02 * i) * 100);
+    const turned = g.aim;
+    expect(turned).toBeCloseTo(UP + 0.2, 6);
+    const fx = CX + Math.sin(-0.2) * 100;
+    const fy = CY + Math.cos(-0.2) * 100;
+    for (let i = 1; i <= 15; i++) moveAim(g, CX, CY, fx + Math.sin(-0.2) * 6 * i, fy + Math.cos(-0.2) * 6 * i);
+    expect(g.aim).toBeCloseTo(turned, 9);
+    expect(g.power).toBeCloseTo(90 / PULL_PX, 6);
+  });
+
+  it('sliding back toward the start cancels the shot', () => {
+    const g = dragLine(UP, 3, CX, CY + 60, CX, CY + 200, 14);
+    expect(g.power).toBeGreaterThan(0.5);
+    for (let i = 1; i <= 14; i++) moveAim(g, CX, CY, CX, CY + 200 - i * 10);
+    expect(g.power).toBe(0);
+    expect(releasePower(g)).toBeNull();
+    // The same for a grab.
+    const h = dragLine(UP, 3, CX + 3, CY, CX + 3, CY + 120, 12);
+    expect(releasePower(h)).not.toBeNull();
+    moveAim(h, CX, CY, CX + 3, CY + 4);
+    expect(releasePower(h)).toBeNull();
+  });
+
+  it('a long press that drifts a few px is neither a tap nor a shot', () => {
+    for (const grab of [true, false]) {
+      const y0 = grab ? CY : CY + 80;
+      const g = beginAim(CX, CY, CX, y0, UP, grabRadiusPx(3));
+      expect(g.grab).toBe(grab);
+      // Drift 7.9 px straight away from the ball in small steps (the old code fired at 7.5 px).
+      for (let i = 1; i <= 8; i++) moveAim(g, CX, CY, CX, y0 + i * 0.9875);
+      expect(g.moved).toBe(false);
+      expect(isTap(g, 900)).toBe(false);
+      expect(releasePower(g)).toBeNull();
+      // Just past the tap threshold but still under the fire threshold: no shot either.
+      moveAim(g, CX, CY, CX, y0 + 11);
+      expect(g.moved).toBe(true);
+      expect(releasePower(g)).toBeNull();
+    }
+    expect(FIRE_MIN * PULL_PX).toBeGreaterThan(8);
+  });
+
+  it('a quick press without movement is a tap', () => {
+    const g = beginAim(CX, CY, CX + 50, CY - 200, UP, grabRadiusPx(3));
+    moveAim(g, CX, CY, CX + 52, CY - 201);
+    expect(isTap(g, 120)).toBe(true);
+    expect(isTap(g, 400)).toBe(false);
+    expect(releasePower(g)).toBeNull();
+  });
+
+  it('maps the firing range onto the full shot-power range', () => {
+    const g = beginAim(CX, CY, CX, CY, UP, grabRadiusPx(3));
+    moveAim(g, CX, CY, CX, CY + FIRE_MIN * PULL_PX + 1e-9);
+    expect(releasePower(g)).toBeCloseTo(0, 6);
+    moveAim(g, CX, CY, CX, CY + PULL_PX * 3);
+    expect(releasePower(g)).toBe(1);
+  });
+
+  it('rotation is damped right next to the ball and never jumps more than 0.6 rad per step', () => {
+    const g = beginAim(CX, CY, CX + 30, CY, UP, 24);
+    expect(g.grab).toBe(false);
+    moveAim(g, CX, CY, CX - 30, CY + 1); // finger jumps across the ball
+    expect(Math.abs(g.aim - UP)).toBeLessThanOrEqual(0.6 + 1e-9);
   });
 });

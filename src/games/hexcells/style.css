@@ -1,10 +1,60 @@
 /* Hex Logic (hexcells) — all classes prefixed with .hx- */
 
+/* ── Layout: HUD / board / controls; wide screens move HUD + controls into a side column ── */
+.hx-game {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'hud'
+    'area'
+    'controls';
+}
+.hx-game > .hx-hud {
+  grid-area: hud;
+}
+.hx-game > .hx-area {
+  grid-area: area;
+}
+.hx-game > .hx-controls {
+  grid-area: controls;
+}
+
+.hx-game.hx-land {
+  grid-template-columns: minmax(0, 1fr) clamp(216px, 30%, 300px);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    'area hud'
+    'area controls'
+    'area msg';
+}
+.hx-land > .hx-hud {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 8px;
+  padding: 8px 12px 4px;
+}
+.hx-land .hx-modes {
+  flex-direction: column;
+  gap: 8px;
+}
+.hx-land .hx-mode {
+  min-height: 46px;
+}
+.hx-land > .hx-controls {
+  padding: 4px 12px;
+}
+
 .hx-hud .stat-value.hx-blue {
   color: var(--accent);
 }
 .hx-hud .stat-value.hx-bad {
   color: var(--danger);
+}
+.hx-hud .stat-value.hx-time {
+  font-variant-numeric: tabular-nums;
 }
 .hx-hud .stat.hx-pulse {
   animation: hx-pulse 0.5s ease-in-out 5;
@@ -15,18 +65,122 @@
     color: var(--accent-2);
   }
 }
+.hx-hud .stat.hx-pulse-bad .stat-value {
+  animation: hx-pulse-bad 0.6s ease-in-out 2;
+}
+@keyframes hx-pulse-bad {
+  50% {
+    transform: scale(1.15);
+    color: var(--danger);
+  }
+}
 
 .hx-area {
-  flex: 1;
   min-height: 0;
+  min-width: 0;
   position: relative;
+  overflow: hidden;
 }
 .hx-area canvas {
   -webkit-touch-callout: none;
   user-select: none;
   -webkit-user-select: none;
+  transition: filter 0.15s ease;
+}
+.hx-area.hx-paused canvas {
+  filter: blur(10px);
+}
+.hx-paused-label {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text);
+  pointer-events: none;
+}
+.hx-area.hx-paused .hx-paused-label {
+  display: flex;
 }
 
+/* ── Hint banner: overlays the board (portrait) or sits in the side column (landscape) ── */
+.hx-banner {
+  grid-area: area;
+  align-self: start;
+  justify-self: center;
+  z-index: 3;
+  width: calc(100% - 16px);
+  max-width: 440px;
+  margin: 8px 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 6px 8px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1.5px solid var(--success);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.35;
+  cursor: pointer;
+  animation: hx-banner-in 0.18s ease-out;
+}
+.hx-banner[hidden] {
+  display: none;
+}
+.hx-banner.hx-bottom {
+  align-self: end;
+}
+@keyframes hx-banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+.hx-banner-body {
+  flex: 1;
+  min-width: 0;
+}
+.hx-banner-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--success);
+  margin-bottom: 2px;
+}
+.hx-banner-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  margin: -4px 0 -4px 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+.hx-land > .hx-banner {
+  grid-area: msg;
+  align-self: start;
+  width: auto;
+  max-width: none;
+  margin: 4px 12px 8px;
+  max-height: calc(100% - 12px);
+  overflow-y: auto;
+  font-size: 13px;
+  box-shadow: none;
+}
+.hx-land.hx-has-banner .hx-tip {
+  display: none;
+}
+
+/* ── Controls ── */
 .hx-controls {
   flex: none;
   display: flex;
@@ -105,11 +259,13 @@
   background: var(--accent-text);
 }
 .hx-tip {
+  margin: 0;
   font-size: 11px;
   color: var(--muted);
   text-align: center;
 }
 
+/* ── Result modal ── */
 .hx-result {
   display: flex;
   flex-direction: column;

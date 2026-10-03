@@ -26,6 +26,33 @@
   font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
+.zb-start {
+  min-height: 0;
+  overflow-y: auto;
+  justify-content: center;
+  justify-content: safe center; /* never clip the top when the content is taller than the screen */
+}
+.zb-start-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  min-width: 220px;
+}
+.zb-start-actions p {
+  margin: 0;
+  text-align: center;
+}
+
+/* in-game "↻" menu (inside the shell modal) */
+.zb-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.zb-menu p {
+  margin: 0;
+}
 
 /* ── top bar ─────────────────────────────────────────────────────────── */
 .zb-bar {
@@ -58,6 +85,13 @@
   display: flex;
   flex-direction: column;
 }
+.zb-left {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 .zb-side {
   flex: none;
   display: flex;
@@ -74,6 +108,8 @@
   overscroll-behavior: contain;
 }
 .zb-clue {
+  /* never let the scrolling flex column squash a card below its (possibly multi-line) content */
+  flex: none;
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -135,13 +171,19 @@
   padding: 4px 10px 2px;
 }
 .zb-grid {
-  --zb-ch: 46px;
+  --zb-ch: 46px; /* cell height; 5 categories */
   display: grid;
   grid-template-rows: 22px;
   grid-auto-rows: var(--zb-ch);
   gap: 3px;
   max-width: 640px;
   margin: 0 auto;
+}
+.zb-grid.zb-k4 {
+  --zb-ch: 52px;
+}
+.zb-grid.zb-k3 {
+  --zb-ch: 58px;
 }
 .zb-grid.shake {
   animation: zb-shake 0.4s ease;
@@ -330,8 +372,10 @@
   margin-bottom: 10px;
 }
 .zb-sheet-close {
-  width: 36px;
-  height: 36px;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: -4px -4px -4px 0;
   border: none;
   border-radius: 50%;
   background: var(--surface-2);
@@ -412,9 +456,13 @@
 }
 
 /* wider screens: give the grid some breathing room */
-@media (min-width: 600px) {
-  .zb-grid {
-    --zb-ch: 56px;
+@media (min-width: 600px) and (min-height: 700px) {
+  .zb-grid,
+  .zb-grid.zb-k4 {
+    --zb-ch: 58px;
+  }
+  .zb-grid.zb-k3 {
+    --zb-ch: 62px;
   }
   .zb-cell .l {
     font-size: 12px;
@@ -430,8 +478,10 @@
     flex-direction: row;
     align-items: stretch;
   }
+  .zb-bar {
+    padding: 6px 8px 0 12px;
+  }
   .zb-clues {
-    flex: 1;
     padding: 6px 8px 6px 12px;
   }
   .zb-side {
@@ -441,9 +491,13 @@
     padding-bottom: 2px;
   }
   .zb-grid {
-    --zb-ch: 36px;
+    --zb-ch: 44px;
     grid-template-rows: 18px;
     gap: 2px;
+  }
+  .zb-grid.zb-k4,
+  .zb-grid.zb-k3 {
+    --zb-ch: 46px;
   }
   .zb-hcell {
     height: 18px;
@@ -466,7 +520,7 @@
     padding: 6px 10px 6px;
   }
   .zb-controls .btn {
-    min-height: 40px;
+    min-height: 44px;
     padding-top: 6px;
     padding-bottom: 6px;
   }
@@ -481,5 +535,30 @@
   }
   .zb-sheet-title {
     margin-bottom: 6px;
+  }
+  /* compact start screen */
+  .zb-start {
+    gap: 8px;
+    padding: 10px 24px;
+  }
+  .zb-start .big-icon {
+    font-size: 36px;
+  }
+  .zb-start h2 {
+    font-size: 18px;
+  }
+  .zb-start .zb-desc {
+    display: none;
+  }
+  .zb-start-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .zb-start-actions p {
+    flex-basis: 100%;
+  }
+  .zb-start-actions .btn {
+    min-width: 180px;
   }
 }

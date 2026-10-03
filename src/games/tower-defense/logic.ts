@@ -833,7 +833,8 @@ export function tick(s: GameState, dt: number): void {
     e.seg = p.seg;
   }
 
-  // Towers acquire targets and fire.
+  // Towers fire. The target is chosen afresh by the tower's rule ('first' / 'strongest') for every shot, so a
+  // better candidate entering range (an enemy further along, a boss) is picked up on the very next shot.
   for (const t of s.towers) {
     t.cooldown -= dt;
     const def = TOWER_DEFS[t.type];
@@ -842,19 +843,24 @@ export function tick(s: GameState, dt: number): void {
       runAura(s, t, def, lv);
       continue;
     }
-    let target = t.targetId === null ? undefined : findEnemy(s, t.targetId);
-    if (target && (!canHit(def, target) || !inRange(t, lv.range + 0.15, target))) target = undefined;
-    if (!target) {
-      target = pickTarget(t, s.enemies, lv.range) ?? undefined;
-      t.targetId = target ? target.id : null;
-    }
-    if (target) {
-      if (t.cooldown <= 0) {
-        t.cooldown += 1 / lv.rate;
-        if (t.cooldown < 0) t.cooldown = 1 / lv.rate;
-        fire(s, t, def, lv, target);
+    if (t.cooldown > 0) {
+      // Between shots the turret keeps aiming at its last target (cosmetic only).
+      if (t.targetId !== null) {
+        const held = findEnemy(s, t.targetId);
+        if (held && canHit(def, held)) t.angle = Math.atan2(held.y - t.y, held.x - t.x);
+        else t.targetId = null;
       }
-    } else if (t.cooldown < 0) t.cooldown = 0;
+      continue;
+    }
+    const target = pickTarget(t, s.enemies, lv.range);
+    t.targetId = target ? target.id : null;
+    if (!target) {
+      t.cooldown = 0;
+      continue;
+    }
+    t.cooldown += 1 / lv.rate;
+    if (t.cooldown < 0) t.cooldown = 1 / lv.rate;
+    fire(s, t, def, lv, target);
   }
 
   // Projectiles home in on their target (or its last position).

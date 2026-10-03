@@ -37,6 +37,8 @@ export interface Mover {
 export interface Booster extends Rect {
   /** Unit direction of the push. */
   dir: Vec;
+  /** Acceleration multiplier (default 1 = PHYS.boostAccel). */
+  power?: number;
 }
 export interface Hole {
   par: number;
@@ -73,9 +75,9 @@ export interface DiffConfig {
 export type Difficulty = 'casual' | 'standard' | 'pro';
 export const DIFFICULTIES: Difficulty[] = ['casual', 'standard', 'pro'];
 export const DIFF: Record<Difficulty, DiffConfig> = {
-  casual: { guide: 'bounce', captureSpeed: 6, maxStrokes: 8, sandMult: 3 },
-  standard: { guide: 'line', captureSpeed: 4.6, maxStrokes: 8, sandMult: 4 },
-  pro: { guide: 'short', captureSpeed: 3.6, maxStrokes: 8, sandMult: 5 },
+  casual: { guide: 'bounce', captureSpeed: 5.6, maxStrokes: 8, sandMult: 3 },
+  standard: { guide: 'line', captureSpeed: 4.2, maxStrokes: 8, sandMult: 4 },
+  pro: { guide: 'short', captureSpeed: 3.3, maxStrokes: 8, sandMult: 5 },
 };
 
 export const PHYS = {
@@ -85,18 +87,24 @@ export const PHYS = {
   /** Constant deceleration (units/s²). */
   decel: 1.4,
   restitution: 0.85,
+  /** Rail restitution inside a booster: the belt grips the ball, so it settles against a rail. */
+  boostRestitution: 0.35,
   bumperRestitution: 0.92,
   stopSpeed: 0.12,
   boostAccel: 14,
   boostMax: 16,
-  /** Largest pull distance (units) that maps to full power. */
-  maxDrag: 4.2,
+  /** Default pull distance (units) that maps to full power (the UI passes a screen-based value). */
+  maxDrag: 3.6,
   /** Pulls shorter than this cancel the shot. */
-  minDrag: 0.45,
+  minDrag: 0.6,
+  /** Capture threshold multiplier for a dead-centre pass (rim = 1). */
+  cupCentreBonus: 0.45,
   /** Speed multiplier when the ball skips over the cup too fast. */
   cupSkip: 0.88,
   /** Extra friction kicks in after this many seconds of rolling (safety net). */
   stuckAfter: 24,
+  /** Hard stop after this many seconds of rolling (e.g. a ball pinned by a booster). */
+  maxRoll: 32,
   step: 1 / 120,
 };
 
@@ -160,10 +168,6 @@ export function moverVel(m: Mover, t: number): Vec {
   const w = (2 * Math.PI) / m.period;
   const c = Math.cos(w * t + m.phase) * w;
   return { x: m.dx * c, y: m.dy * c };
-}
-
-function rectToPoly(r: Rect): Vec[] {
-  return rect(r.x, r.y, r.w, r.h);
 }
 
 // ── Hole definitions ──────────────────────────────────────────────────────
@@ -251,14 +255,14 @@ export const HOLES: Hole[] = [
     outline: poly([2, 0], [8, 0], [10, 2], [10, 14], [8, 16], [2, 16], [0, 14], [0, 2]),
     blocks: [poly([2, 10], [1.5, 9.6], [6.5, 5.6], [7, 6])],
   }),
-  // 8 · Booster — a launch pad straight at the cup; sand catches the overshoot.
+  // 8 · Crosswind — a full-width conveyor pushes the ball sideways: aim off the line to compensate.
   hole({
     par: 2,
     start: { x: 5, y: 14 },
-    cup: { x: 5, y: 2 },
-    outline: rect(2, 0, 6, 16),
-    boosters: [{ x: 3.5, y: 8, w: 3, h: 3.5, dir: { x: 0, y: -1 } }],
-    sand: [{ x: 2, y: 0, w: 6, h: 1.2 }],
+    cup: { x: 5, y: 2.6 },
+    outline: rect(1, 0, 8, 16),
+    boosters: [{ x: 1, y: 6.6, w: 8, h: 2.2, dir: { x: 1, y: 0 }, power: 0.45 }],
+    sand: [{ x: 1, y: 0, w: 8, h: 1.1 }],
   }),
   // 9 · Moving gate — time the slider.
   hole({
@@ -269,12 +273,12 @@ export const HOLES: Hole[] = [
     blocks: [rect(0.5, 8, 2, 0.9), rect(7.5, 8, 2, 0.9)],
     movers: [mover(5, 8.45, 2.4, 0.9, 0.7, 3)],
   }),
-  // 10 · Sand island — the cup sits in a bunker flanked by water.
+  // 10 · Sand island — the cup sits in a bunker flanked by water, a lip guards the front.
   hole({
     par: 3,
     start: { x: 5, y: 14 },
-    cup: { x: 5, y: 3 },
-    blocks: [rect(0, 8, 3.5, 0.8), rect(6.5, 8, 3.5, 0.8)],
+    cup: { x: 5, y: 2.9 },
+    blocks: [rect(0, 8, 3.5, 0.8), rect(6.5, 8, 3.5, 0.8), rect(4.3, 4.1, 1.4, 0.4)],
     sand: [{ x: 2.5, y: 0.8, w: 5, h: 4.6 }],
     water: [
       { x: 0, y: 0, w: 2.5, h: 5.4 },
@@ -465,12 +469,16 @@ export interface Aim {
   pull: number;
 }
 
-export function aimFromDrag(ball: Vec, pointer: Vec): Aim {
-  const dx = ball.x - pointer.x;
-  const dy = ball.y - pointer.y;
+/**
+ * Slingshot: the shot goes from the pointer back through the anchor (the ball, or wherever the drag
+ * started). Pulls inside `minDrag` cancel; power grows linearly up to `maxDrag`.
+ */
+export function aimFromDrag(anchor: Vec, pointer: Vec, maxDrag = PHYS.maxDrag, minDrag = PHYS.minDrag): Aim {
+  const dx = anchor.x - pointer.x;
+  const dy = anchor.y - pointer.y;
   const pull = Math.hypot(dx, dy);
-  if (pull < PHYS.minDrag) return { valid: false, dir: { x: 0, y: -1 }, power: 0, pull };
-  const power = Math.min(1, (pull - PHYS.minDrag * 0.5) / PHYS.maxDrag);
+  if (!(pull >= minDrag) || !(maxDrag > minDrag)) return { valid: false, dir: { x: 0, y: -1 }, power: 0, pull };
+  const power = Math.max(0.01, Math.min(1, (pull - minDrag) / (maxDrag - minDrag)));
   return { valid: true, dir: { x: dx / pull, y: dy / pull }, power, pull };
 }
 
@@ -557,6 +565,49 @@ export function collideCircle(b: Ball, c: Circle, r: number, restitution: number
   return false;
 }
 
+/**
+ * Ball vs (possibly moving) axis-aligned rectangle. Unlike four separate segments this also resolves a
+ * centre that ended up inside the rectangle, pushing it out through the nearest face.
+ */
+export function collideRect(b: Ball, r: Rect, radius: number, restitution: number, vel?: Vec): boolean {
+  const qx = b.x < r.x ? r.x : b.x > r.x + r.w ? r.x + r.w : b.x;
+  const qy = b.y < r.y ? r.y : b.y > r.y + r.h ? r.y + r.h : b.y;
+  let nx = b.x - qx;
+  let ny = b.y - qy;
+  const d = Math.hypot(nx, ny);
+  let pen: number;
+  if (d > 1e-9) {
+    if (d >= radius) return false;
+    nx /= d;
+    ny /= d;
+    pen = radius - d;
+  } else {
+    const left = b.x - r.x;
+    const right = r.x + r.w - b.x;
+    const top = b.y - r.y;
+    const bottom = r.y + r.h - b.y;
+    const m = Math.min(left, right, top, bottom);
+    if (m === left) [nx, ny] = [-1, 0];
+    else if (m === right) [nx, ny] = [1, 0];
+    else if (m === top) [nx, ny] = [0, -1];
+    else [nx, ny] = [0, 1];
+    pen = m + radius;
+  }
+  b.x += nx * pen;
+  b.y += ny * pen;
+  const svx = vel?.x ?? 0;
+  const svy = vel?.y ?? 0;
+  const rvx = b.vx - svx;
+  const rvy = b.vy - svy;
+  const vn = rvx * nx + rvy * ny;
+  if (vn < 0) {
+    b.vx = rvx - (1 + restitution) * vn * nx + svx;
+    b.vy = rvy - (1 + restitution) * vn * ny + svy;
+    return true;
+  }
+  return false;
+}
+
 export function inSand(h: Hole, x: number, y: number): boolean {
   return h.sand.some((r) => rectContains(r, x, y));
 }
@@ -564,13 +615,14 @@ export function inSand(h: Hole, x: number, y: number): boolean {
 /** Threshold speed below which the cup captures a ball whose centre is `dist` from the cup centre. */
 export function captureThreshold(cfg: DiffConfig, dist: number): number {
   const closeness = Math.max(0, 1 - dist / CUP_R);
-  return cfg.captureSpeed * (1 + 0.6 * closeness);
+  return cfg.captureSpeed * (1 + PHYS.cupCentreBonus * closeness);
 }
 
-/** Ball is outside the playable area or deep inside a solid (tunnelling guard). */
-export function isBallLost(h: Hole, b: Vec, time: number): boolean {
+/** Ball is outside the playable area or deep inside a solid (tunnelling guard). Movers are checked when `time` is given. */
+export function isBallLost(h: Hole, b: Vec, time?: number): boolean {
   if (!pointInPoly(b.x, b.y, h.outline)) return true;
   for (const blk of h.blocks) if (pointInPoly(b.x, b.y, blk)) return true;
+  if (time === undefined) return false;
   for (const m of h.movers) {
     const r = moverRect(m, time);
     const inset = BALL_R * 0.5;
@@ -602,19 +654,17 @@ function subStep(st: SimState, h: Hole, cfg: DiffConfig, dt: number, events: Phy
     for (const m of h.movers) {
       const r = moverRect(m, st.time);
       const vel = moverVel(m, st.time);
-      for (const s of polyToSegs(rectToPoly(r))) {
-        if (collideSeg(b, s, BALL_R, PHYS.restitution, vel)) {
-          // Nudge the ball out of the block's lane so it cannot be shoved back and forth forever.
-          const al = Math.hypot(m.dx, m.dy) || 1;
-          const px = -m.dy / al;
-          const py = m.dx / al;
-          const side = (b.x - (r.x + r.w / 2)) * px + (b.y - (r.y + r.h / 2)) * py >= 0 ? 1 : -1;
-          b.vx += px * side * 2.5;
-          b.vy += py * side * 2.5;
-          st.moving = true;
-          st.rolling = 0;
-          events.push({ type: 'mover', x: b.x, y: b.y });
-        }
+      if (collideRect(b, r, BALL_R, PHYS.restitution, vel)) {
+        // Nudge the ball out of the block's lane so it cannot be shoved back and forth forever.
+        const al = Math.hypot(m.dx, m.dy) || 1;
+        const px = -m.dy / al;
+        const py = m.dx / al;
+        const side = (b.x - (r.x + r.w / 2)) * px + (b.y - (r.y + r.h / 2)) * py >= 0 ? 1 : -1;
+        b.vx += px * side * 2.5;
+        b.vy += py * side * 2.5;
+        st.moving = true;
+        st.rolling = 0;
+        events.push({ type: 'mover', x: b.x, y: b.y });
       }
     }
     if (!st.moving) {
@@ -642,8 +692,9 @@ function integrate(st: SimState, h: Hole, cfg: DiffConfig, dt: number, segs: Seg
   for (const z of h.boosters) {
     if (rectContains(z, b.x, b.y)) {
       boosting = true;
-      b.vx += z.dir.x * PHYS.boostAccel * dt;
-      b.vy += z.dir.y * PHYS.boostAccel * dt;
+      const acc = PHYS.boostAccel * (z.power ?? 1) * dt;
+      b.vx += z.dir.x * acc;
+      b.vy += z.dir.y * acc;
       const sp = speedOf(b);
       if (sp > PHYS.boostMax) {
         b.vx *= PHYS.boostMax / sp;
@@ -671,10 +722,12 @@ function integrate(st: SimState, h: Hole, cfg: DiffConfig, dt: number, segs: Seg
   b.y += b.vy * dt;
 
   // Collisions (a few relaxation passes for corners).
+  let contact = false;
+  const rest = boosting ? PHYS.boostRestitution : PHYS.restitution;
   for (let pass = 0; pass < 3; pass++) {
     let any = false;
     for (const s of segs) {
-      if (collideSeg(b, s, BALL_R, PHYS.restitution)) {
+      if (collideSeg(b, s, BALL_R, rest)) {
         any = true;
         if (pass === 0) events.push({ type: 'wall', x: b.x, y: b.y, speed: speedOf(b) });
       }
@@ -686,16 +739,13 @@ function integrate(st: SimState, h: Hole, cfg: DiffConfig, dt: number, segs: Seg
       }
     });
     for (const m of h.movers) {
-      const r = moverRect(m, st.time);
-      const vel = moverVel(m, st.time);
-      for (const s of polyToSegs(rectToPoly(r))) {
-        if (collideSeg(b, s, BALL_R, PHYS.restitution, vel)) {
-          any = true;
-          if (pass === 0) events.push({ type: 'mover', x: b.x, y: b.y });
-        }
+      if (collideRect(b, moverRect(m, st.time), BALL_R, rest, moverVel(m, st.time))) {
+        any = true;
+        if (pass === 0) events.push({ type: 'mover', x: b.x, y: b.y });
       }
     }
     if (!any) break;
+    contact = true;
   }
 
   // Water.
@@ -742,8 +792,10 @@ function integrate(st: SimState, h: Hole, cfg: DiffConfig, dt: number, segs: Seg
     return;
   }
 
-  // Rest.
-  if (speedOf(b) < PHYS.stopSpeed) {
+  // Rest (or the hard safety stop for a ball that somehow never settles).
+  // A booster only lets the ball settle when it is pressed against something (e.g. a crosswind
+  // pinning it to a rail); otherwise it keeps pushing until the ball leaves it.
+  if ((speedOf(b) < PHYS.stopSpeed && (!boosting || contact)) || st.rolling > PHYS.maxRoll) {
     b.vx = 0;
     b.vy = 0;
     st.moving = false;
@@ -820,6 +872,45 @@ export function vsPar(scores: number[], holes: Hole[] = HOLES): number {
   let d = 0;
   scores.forEach((s, i) => (d += s - holes[i].par));
   return d;
+}
+
+// ── Saved progress ────────────────────────────────────────────────────────
+
+/** Round in progress, persisted between sessions. */
+export interface Progress {
+  diff: Difficulty;
+  /** Index of the hole being played (0-based). */
+  hole: number;
+  /** Final scores of the holes already finished (length === hole). */
+  scores: number[];
+  /** Strokes already taken on the current hole. */
+  strokes: number;
+  /** Where the ball rests on the current hole. */
+  ball: Vec;
+}
+
+const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** Guards against corrupted / outdated saves so a bad value can never crash or soft-lock a round. */
+export function isValidProgress(p: unknown): p is Progress {
+  if (!p || typeof p !== 'object') return false;
+  const o = p as Record<string, unknown>;
+  if (!DIFFICULTIES.includes(o.diff as Difficulty)) return false;
+  const cfg = DIFF[o.diff as Difficulty];
+  if (!Number.isInteger(o.hole) || (o.hole as number) < 0 || (o.hole as number) >= HOLES.length) return false;
+  if (!Array.isArray(o.scores) || o.scores.length !== o.hole) return false;
+  if (!o.scores.every((s) => Number.isInteger(s) && s >= 1 && s <= cfg.maxStrokes + 1)) return false;
+  // strokes === maxStrokes is legal: the last putt was in flight when the game was closed.
+  if (!Number.isInteger(o.strokes) || (o.strokes as number) < 0 || (o.strokes as number) > cfg.maxStrokes) return false;
+  const b = o.ball as Vec | null;
+  if (!b || typeof b !== 'object' || !finite(b.x) || !finite(b.y)) return false;
+  const h = HOLES[o.hole as number];
+  // The saved rest spot must be a legal place for the ball on that hole.
+  if (isBallLost(h, b)) return false;
+  if (h.water.some((w) => rectContains(w, b.x, b.y))) return false;
+  if (wallSegs(h).some((s) => distToSeg(b.x, b.y, s) < BALL_R * 0.9)) return false;
+  if (h.bumpers.some((c) => Math.hypot(b.x - c.x, b.y - c.y) < c.r + BALL_R * 0.9)) return false;
+  return true;
 }
 
 // ── Validation / solvability (tests and sanity checks) ────────────────────

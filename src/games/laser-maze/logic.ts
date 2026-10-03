@@ -541,3 +541,130 @@ export function nextOrient(current: Orient | undefined): Orient | null {
   if (current === '/') return '\\';
   return null;
 }
+
+// ── Progress ───────────────────────────────────────────────────────────────
+export interface WinOutcome {
+  /** New value for the highest unlocked level. */
+  unlocked: number;
+  /** Level the start screen should preselect afterwards (the one after the cleared level). */
+  selectLevel: number;
+  /** Per-level best times (seconds, 0.1 s precision), possibly updated. */
+  times: Record<string, number>;
+  /** A time was stored for this level (first hint-free clear or a faster one). */
+  timeSaved: boolean;
+  /** The stored time beat an earlier one. */
+  improvedTime: boolean;
+}
+
+/**
+ * Everything a cleared level changes in the saved progress. Pure, so the UI can persist it the
+ * moment the level is won (before any celebration delay that a restart / exit could cut short).
+ * Hinted clears unlock the next level but never set a best time.
+ */
+export function applyWin(unlocked: number, times: Readonly<Record<string, number>>, level: number, elapsed: number, hints: number): WinOutcome {
+  const next: Record<string, number> = { ...times };
+  const key = String(level);
+  const prev = times[key];
+  const t = Math.round(Math.max(0, elapsed) * 10) / 10;
+  let timeSaved = false;
+  if (hints === 0 && Number.isFinite(t) && (prev === undefined || t < prev)) {
+    next[key] = t;
+    timeSaved = true;
+  }
+  return {
+    unlocked: Math.max(1, unlocked, level + 1),
+    selectLevel: level + 1,
+    times: next,
+    timeSaved,
+    improvedTime: timeSaved && prev !== undefined,
+  };
+}
+
+// ── Saved board (resume an unfinished level) ───────────────────────────────
+export interface SavedBoard {
+  level: number;
+  seed: number;
+  /** [cell index, orientation] of the player's mirrors. */
+  placed: [number, Orient][];
+  elapsed: number;
+  hints: number;
+}
+
+export interface RestoredBoard {
+  placed: Map<number, Orient>;
+  elapsed: number;
+  hints: number;
+}
+
+const MAX_SAVED_ELAPSED = 99 * 3600;
+
+export function snapshotBoard(levelNum: number, lv: Level, placed: ReadonlyMap<number, Orient>, elapsed: number, hints: number): SavedBoard {
+  return {
+    level: levelNum,
+    seed: lv.seed,
+    placed: [...placed.entries()],
+    elapsed: Math.round(Math.max(0, elapsed) * 10) / 10,
+    hints,
+  };
+}
+
+/**
+ * Validate a stored board against the level it claims to belong to. Returns null for anything that
+ * does not match exactly (other level / seed, mirrors on blocked cells, over budget, garbage).
+ */
+export function restoreBoard(raw: unknown, levelNum: number, lv: Level): RestoredBoard | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Partial<SavedBoard>;
+  if (s.level !== levelNum || s.seed !== lv.seed || !Array.isArray(s.placed)) return null;
+  if (s.placed.length > lv.mirrors) return null;
+  const grid = buildGrid(lv);
+  const placed = new Map<number, Orient>();
+  for (const e of s.placed as unknown[]) {
+    if (!Array.isArray(e) || e.length !== 2) return null;
+    const [k, o] = e as [unknown, unknown];
+    if (typeof k !== 'number' || !Number.isInteger(k) || k < 0 || k >= grid.length) return null;
+    if (o !== '/' && o !== '\\') return null;
+    if (grid[k] !== EMPTY || placed.has(k)) return null;
+    placed.set(k, o);
+  }
+  const elapsed = typeof s.elapsed === 'number' && Number.isFinite(s.elapsed) ? Math.min(MAX_SAVED_ELAPSED, Math.max(0, s.elapsed)) : 0;
+  const hints = typeof s.hints === 'number' && Number.isFinite(s.hints) ? Math.max(0, Math.floor(s.hints)) : 0;
+  return { placed, elapsed, hints };
+}
+
+// ── Board layout / hit testing ─────────────────────────────────────────────
+/** Minimum comfortable touch target in CSS px. */
+export const MIN_TOUCH = 44;
+
+export interface BoardLayout {
+  cell: number;
+  ox: number;
+  oy: number;
+}
+
+/**
+ * Largest square cells that fit a w×h area (capped at `maxCell`). A 6 px frame is kept around the
+ * board unless it would shrink the cells below the touch target, in which case the frame drops to
+ * 1 px so the board uses (almost) the full width.
+ */
+export function boardLayout(w: number, h: number, n: number, maxCell = 64): BoardLayout {
+  const fit = (pad: number) => Math.min(maxCell, Math.floor((w - 2 * pad) / n), Math.floor((h - 2 * pad) / n));
+  let cell = fit(6);
+  if (cell < MIN_TOUCH) cell = fit(1);
+  cell = Math.max(8, cell);
+  return { cell, ox: Math.floor((w - cell * n) / 2), oy: Math.floor((h - cell * n) / 2) };
+}
+
+/**
+ * Cell index under a point, or -1. Points up to `tol` cells outside the board snap to the nearest
+ * edge cell, which makes the outer cells easier to hit on small screens.
+ */
+export function cellFromPoint(px: number, py: number, layout: BoardLayout, n: number, tol = 0.35): number {
+  const fx = (px - layout.ox) / layout.cell;
+  const fy = (py - layout.oy) / layout.cell;
+  if (!Number.isFinite(fx) || !Number.isFinite(fy)) return -1;
+  if (fx < -tol || fy < -tol || fx >= n + tol || fy >= n + tol) return -1;
+  const x = Math.min(n - 1, Math.max(0, Math.floor(fx)));
+  const y = Math.min(n - 1, Math.max(0, Math.floor(fy)));
+  return cellIndex(n, x, y);
+}

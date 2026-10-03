@@ -1,9 +1,10 @@
-import type { GameContext, GameInstance, GameModule, ThemeName } from '../../app/types';
+import type { GameContext, GameInstance, GameModule, ModalHandle, ThemeName } from '../../app/types';
 import { el, button, segmented } from '../../app/ui';
-import { createCanvas, createLoop, onPointer, clamp, roundRect, type CanvasHandle } from '../../app/canvas';
+import { createCanvas, createLoop, onPointer, clamp, roundRect, type CanvasHandle, type PointerInfo } from '../../app/canvas';
 import {
   CUSHION,
   EDGE,
+  FIRE_MIN,
   H,
   MODES,
   MODE_LIST,
@@ -12,15 +13,21 @@ import {
   RAIL,
   W,
   ballsLeft,
+  beginAim,
+  grabRadiusPx,
   isMode,
   isStripe,
+  isTap,
+  moveAim,
   nearestObjectAngle,
   newGame,
   placeCueBall,
   predictShot,
+  releasePower,
   shoot,
   starsFor,
   stepGame,
+  type AimGesture,
   type GameState,
   type Mode,
   type PhysEvent,
@@ -30,7 +37,7 @@ import './style.css';
 const strings = {
   zh: {
     rules:
-      '目标：用最少的杆数把所有彩球打进袋。\n拖动桌面可旋转瞄准线（手指离白球越远越精细），点一下桌面则直接瞄向该点。\n手指沿远离白球的方向拉开即蓄力（蓄力时瞄准线会锁定），松手击球；球未停稳前不能击球。\n白球落袋 = 犯规：杆数 +1，并可把白球放到桌面任意位置（点击放置）。\n6 球 / 9 球模式有辅助瞄准线（幽灵球 + 碰撞方向），15 球模式关闭辅助线。\n杆数越少越好，低于标准杆可获三星评价。',
+      '目标：用最少的杆数把所有彩球打进袋。\n瞄准：在桌面上绕着白球拖动手指即可旋转瞄准线（离白球越远越精细）；点一下桌面则直接瞄向该点。\n蓄力：手指朝远离白球的方向拉开，右侧力度条随之增长（蓄力时瞄准锁定），松手击球。\n也可以按住白球直接向后拉，瞄准方向保持不变。想取消就滑回起点再松手。\n白球落袋 = 犯规：杆数 +1，并可点击桌面任意位置摆放白球。\n6 球 / 9 球有辅助瞄准线（幽灵球 + 碰撞方向），15 球没有；球未停稳前不能击球。\n杆数越少越好，低于标准杆可获三星评价。',
     desc: '真实物理台球：拖动瞄准、拉开蓄力，用最少的杆数清台。',
     chooseMode: '选择模式',
     mode6: '6 球',
@@ -48,17 +55,19 @@ const strings = {
     placeCue: '点击桌面放置白球',
     scratch: '白球落袋！杆数 +1，可自由摆放白球',
     combo: '一杆 {n} 球！',
-    dragHint: '拖动瞄准 · 拉开蓄力 · 松手击球',
+    dragHint: '绕白球拖动瞄准，向外拉开松手击球',
     clearedIn: '{n} 杆清台！',
     clearedIn1: '{n} 杆清台！',
     parResult: '标准杆 {par} · {diff}',
     scratchCount: '犯规 {n} 次',
+    scratchCount1: '犯规 {n} 次',
+    restartConfirm: '重新摆球开始新的一局？当前进度将丢失。',
     changeMode: '模式',
     even: '持平',
   },
   en: {
     rules:
-      'Goal: pocket every object ball in as few shots as possible.\nDrag anywhere on the table to rotate the aim (the further your finger is from the cue ball, the finer the control). Tap a spot to aim straight at it.\nPull your finger away from the cue ball to charge power (the aim locks while charging), then release to shoot. You cannot shoot while balls are moving.\nScratch (cue ball pocketed) = +1 penalty shot and ball in hand: tap anywhere to place the cue ball.\n6-ball and 9-ball show an aim guide (ghost ball + collision directions); 15-ball has no guide.\nFewer shots is better — beat par for three stars.',
+      'Goal: pocket every object ball in as few shots as possible.\nAim: drag around the cue ball to rotate the aim line (further away = finer control), or tap a spot to aim straight at it.\nPower: pull your finger away from the cue ball to fill the power bar on the right (the aim locks while charging), then release to shoot.\nOr press on the cue ball and pull straight back: the aim stays fixed. To cancel, slide back to where you started and release.\nScratch (cue ball pocketed) = +1 penalty shot and ball in hand: tap anywhere to place the cue ball.\n6- and 9-ball show an aim guide (ghost ball + directions); 15-ball has none. You cannot shoot while balls are moving.\nFewer shots is better: beat par for three stars.',
     desc: 'Real-physics pool: drag to aim, pull back for power, clear the table in the fewest shots.',
     chooseMode: 'Choose mode',
     mode6: '6 balls',
@@ -76,23 +85,25 @@ const strings = {
     placeCue: 'Tap the table to place the cue ball',
     scratch: 'Scratch! +1 shot, ball in hand',
     combo: '{n} balls in one shot!',
-    dragHint: 'Drag to aim · pull away for power · release to shoot',
+    dragHint: 'Drag around to aim, pull away to shoot',
     clearedIn: 'Cleared in {n} shots!',
     clearedIn1: 'Cleared in {n} shot!',
     parResult: 'Par {par} · {diff}',
     scratchCount: '{n} scratches',
+    scratchCount1: '{n} scratch',
+    restartConfirm: 'Re-rack and start a new game? Current progress will be lost.',
     changeMode: 'Modes',
     even: 'even',
   },
 };
 
 const TAU = Math.PI * 2;
-/** Finger pull-back (CSS px) needed for full power. */
-const PULL_PX = 150;
-/** Power level at which the aim becomes (almost) locked during the pull-back. */
-const AIM_LOCK_POWER = 0.15;
 const SINK_TIME = 0.38;
 const STRIKE_TIME = 0.1;
+/** CSS px reserved to the right of the table for the power gauge (so it never covers the rail or a pocket). */
+const BAR_GUTTER = 16;
+const BAR_W = 7;
+const BAR_GAP = 5;
 
 const BALL_COLORS = ['#f4c80c', '#1e55c9', '#d8302a', '#6d2fb5', '#f07c1a', '#15873d', '#8c1f2d', '#141414'];
 const IVORY = '#f4efe2';
@@ -150,9 +161,17 @@ interface Sink {
   t: number;
 }
 
-type Drag =
-  | { kind: 'place' }
-  | { kind: 'aim'; x0: number; y0: number; t0: number; lastAngle: number; d0: number; moved: boolean };
+/** One active pointer at a time (`pid`); other fingers are ignored until it lifts. */
+type Drag = { kind: 'place'; pid: number } | { kind: 'aim'; pid: number; t0: number; g: AimGesture };
+
+interface UiColors {
+  accent: string;
+  success: string;
+  warning: string;
+  danger: string;
+  muted: string;
+  border: string;
+}
 
 function create(ctx: GameContext): GameInstance {
   const { root, t } = ctx;
@@ -182,25 +201,59 @@ function create(ctx: GameContext): GameInstance {
   let hudLeft: HTMLElement | null = null;
   let hudBest: HTMLElement | null = null;
 
-  const removeRestart = ctx.addHeaderAction({
-    icon: '↻',
-    label: t('restart'),
-    onClick: () => {
-      if (game && game.phase !== 'done' && game.shots > 0) {
-        ctx.showModal({
-          title: t('restart'),
-          body: t('quitConfirm'),
-          buttons: [{ label: t('cancel') }, { label: t('confirm'), primary: true, onClick: () => showStart() }],
-        });
-      } else {
-        showStart();
-      }
-    },
-  });
-  ctx.onDestroy(() => {
-    removeRestart();
-    teardownGame();
-  });
+  let removeRestart: (() => void) | null = null;
+  /** Bumped on every new rack / teardown so a stale confirmation can never act on a later game. */
+  let gameSerial = 0;
+  let confirmModal: ModalHandle | null = null;
+  let endModal: ModalHandle | null = null;
+  let colors = readColors();
+
+  function readColors(): UiColors {
+    const v = (name: string, fallback: string) => ctx.cssVar(name) || fallback;
+    return {
+      accent: v('--accent', '#5b8cff'),
+      success: v('--success', '#3ddc97'),
+      warning: v('--warning', '#ffc857'),
+      danger: v('--danger', '#ff5470'),
+      muted: v('--muted', '#8a93a6'),
+      border: v('--border', 'rgba(127,127,127,0.35)'),
+    };
+  }
+
+  function closeModals(): void {
+    confirmModal?.close();
+    confirmModal = null;
+    endModal?.close();
+    endModal = null;
+  }
+
+  /** Header ↻: re-rack in the same mode (the end modal's "Modes" button is the way back to the selector). */
+  function onRestart(): void {
+    if (!game) return;
+    if (game.phase === 'done' || game.shots === 0) {
+      startGame();
+      return;
+    }
+    const serial = gameSerial;
+    confirmModal?.close();
+    confirmModal = ctx.showModal({
+      title: t('restart'),
+      body: t('restartConfirm'),
+      buttons: [
+        { label: t('cancel'), onClick: () => (confirmModal = null) },
+        {
+          label: t('confirm'),
+          primary: true,
+          onClick: () => {
+            confirmModal = null;
+            if (serial === gameSerial && game) startGame();
+          },
+        },
+      ],
+    });
+  }
+
+  ctx.onDestroy(() => teardownGame());
   ctx.onVisibility((visible) => {
     if (!loop) return;
     if (visible) loop.start();
@@ -208,6 +261,7 @@ function create(ctx: GameContext): GameInstance {
   });
   ctx.onThemeChange((th) => {
     theme = th;
+    colors = readColors();
     dirty = true;
   });
 
@@ -252,6 +306,10 @@ function create(ctx: GameContext): GameInstance {
 
   // ── Game setup / teardown ─────────────────────────────────────────────
   function teardownGame(): void {
+    gameSerial++;
+    closeModals();
+    removeRestart?.();
+    removeRestart = null;
     loop?.stop();
     loop = null;
     offPointer?.();
@@ -271,6 +329,8 @@ function create(ctx: GameContext): GameInstance {
     root.innerHTML = '';
     game = newGame(mode);
     aimAngle = nearestObjectAngle(game.balls);
+    colors = readColors();
+    removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
 
     hudShots = el('div', { class: 'stat-value', text: '0' });
     hudLeft = el('div', { class: 'stat-value', text: String(ballsLeft(game.balls)) });
@@ -302,8 +362,8 @@ function create(ctx: GameContext): GameInstance {
   function layout(w: number, h: number): void {
     const tw = W + EDGE * 2;
     const th = H + EDGE * 2;
-    scale = Math.min((w - 8) / tw, (h - 8) / th);
-    ox = (w - tw * scale) / 2 + EDGE * scale;
+    scale = Math.min((w - 8 - BAR_GUTTER) / tw, (h - 8) / th);
+    ox = (w - BAR_GUTTER - tw * scale) / 2 + EDGE * scale;
     oy = (h - th * scale) / 2 + EDGE * scale;
     dirty = true;
   }
@@ -334,59 +394,40 @@ function create(ctx: GameContext): GameInstance {
     return { x: ox + c.x * scale, y: oy + c.y * scale };
   }
 
-  function onDown(p: { x: number; y: number }): void {
+  function onDown(p: PointerInfo): void {
     if (!game) return;
+    // One finger at a time: a second finger never hijacks the gesture in progress. A gesture whose pointer has
+    // gone (no longer captured, e.g. an up that never arrived) is stale and is simply replaced.
+    if (drag && drag.pid !== p.id && cv?.canvas.hasPointerCapture?.(drag.pid)) return;
+    drag = null;
     if (game.phase === 'inhand') {
-      drag = { kind: 'place' };
+      drag = { kind: 'place', pid: p.id };
       followPlacement(p.x, p.y);
       return;
     }
     if (game.phase !== 'aim') return;
     const c = cuePx();
-    const d0 = Math.hypot(p.x - c.x, p.y - c.y);
-    drag = {
-      kind: 'aim',
-      x0: p.x,
-      y0: p.y,
-      t0: performance.now(),
-      // A press on the cue ball itself behaves like grabbing the cue butt: pulling straight back keeps the aim.
-      lastAngle: d0 < R * scale * 1.6 ? aimAngle + Math.PI : Math.atan2(p.y - c.y, p.x - c.x),
-      d0,
-      moved: false,
-    };
+    drag = { kind: 'aim', pid: p.id, t0: performance.now(), g: beginAim(c.x, c.y, p.x, p.y, aimAngle, grabRadiusPx(scale)) };
     power = 0;
     dirty = true;
   }
 
-  function onMove(p: { x: number; y: number }): void {
-    if (!game || !drag) return;
+  function onMove(p: PointerInfo): void {
+    if (!game || !drag || p.id !== drag.pid) return;
     if (drag.kind === 'place') {
       followPlacement(p.x, p.y);
       return;
     }
     if (game.phase !== 'aim') return;
     const c = cuePx();
-    const dist = Math.hypot(p.x - c.x, p.y - c.y);
-    const fa = Math.atan2(p.y - c.y, p.x - c.x);
-    let da = fa - drag.lastAngle;
-    if (da > Math.PI) da -= TAU;
-    if (da < -Math.PI) da += TAU;
-    // Very close to the ball the finger angle is unstable: dampen it, and never jump more than ~35°.
-    if (dist < 36) da *= dist / 36;
-    da = clamp(da, -0.6, 0.6);
-    const newPower = clamp((dist - drag.d0) / PULL_PX, 0, 1);
-    // Once the player starts charging, (almost) lock the aim so lateral drift during the pull-back
-    // does not spoil a carefully lined-up shot. Pushing back toward the ball releases the lock.
-    const lock = 1 - 0.92 * clamp(Math.max(power, newPower) / AIM_LOCK_POWER, 0, 1);
-    aimAngle += da * lock;
-    drag.lastAngle = fa;
-    power = newPower;
-    if (!drag.moved && Math.hypot(p.x - drag.x0, p.y - drag.y0) > 8) drag.moved = true;
+    moveAim(drag.g, c.x, c.y, p.x, p.y);
+    aimAngle = drag.g.aim;
+    power = drag.g.power;
     dirty = true;
   }
 
-  function onUp(p: { x: number; y: number }): void {
-    if (!game || !drag) return;
+  function onUp(p: PointerInfo): void {
+    if (!game || !drag || p.id !== drag.pid) return;
     const d = drag;
     drag = null;
     dirty = true;
@@ -400,11 +441,12 @@ function create(ctx: GameContext): GameInstance {
       }
       return;
     }
-    if (game.phase !== 'aim') {
-      power = 0;
-      return;
-    }
-    if (!d.moved && performance.now() - d.t0 < 350) {
+    power = 0;
+    if (game.phase !== 'aim') return;
+    const c = cuePx();
+    moveAim(d.g, c.x, c.y, p.x, p.y);
+    aimAngle = d.g.aim;
+    if (isTap(d.g, performance.now() - d.t0)) {
       // Tap: aim straight at the tapped point.
       const tp = toTable(p.x, p.y);
       const cue = game.balls[0];
@@ -413,14 +455,14 @@ function create(ctx: GameContext): GameInstance {
         ctx.play('tap');
         ctx.haptic('light');
       }
-      power = 0;
       return;
     }
-    if (power >= 0.05) fire();
-    else power = 0;
+    const shot = releasePower(d.g);
+    if (shot !== null) fire(shot, d.g.power);
   }
 
-  function onCancel(): void {
+  function onCancel(p: PointerInfo): void {
+    if (!drag || p.id !== drag.pid) return;
     drag = null;
     power = 0;
     dirty = true;
@@ -436,13 +478,12 @@ function create(ctx: GameContext): GameInstance {
     dirty = true;
   }
 
-  function fire(): void {
+  /** `shot`: mapped shot power (0 = softest legal shot); `charge`: the raw gauge level, for the cue animation. */
+  function fire(shot: number, charge: number): void {
     if (!game) return;
-    const pw = power;
-    power = 0;
-    if (!shoot(game, aimAngle, pw)) return;
+    if (!shoot(game, aimAngle, shot)) return;
     strikeT = STRIKE_TIME;
-    strikePower = pw;
+    strikePower = charge;
     ctx.play('shoot');
     ctx.haptic('medium');
     updateHud();
@@ -496,6 +537,7 @@ function create(ctx: GameContext): GameInstance {
           if (e.id !== 0) {
             ctx.play('coin');
             ctx.haptic('success');
+            updateHud(); // keep "Left" in step with the tray of pocketed balls
           }
           break;
         }
@@ -528,6 +570,9 @@ function create(ctx: GameContext): GameInstance {
 
   function finish(): void {
     if (!game) return;
+    // A restart confirmation left open while the last ball rolled in no longer applies.
+    confirmModal?.close();
+    confirmModal = null;
     const shots = game.shots;
     const scratches = game.scratches;
     const isBest = ctx.storage.recordBest(mode, shots, 'lower');
@@ -545,17 +590,37 @@ function create(ctx: GameContext): GameInstance {
       el('p', { class: 'pc-stars', text: '★'.repeat(stars) + '☆'.repeat(3 - stars) }),
       el('p', { class: 'pc-result-main', text: t(shots === 1 ? 'clearedIn1' : 'clearedIn', { n: shots }) }),
       el('p', { class: 'muted', text: t('parResult', { par, diff: diff > 0 ? `+${diff}` : diff < 0 ? String(diff) : t('even') }) }),
-      scratches > 0 ? el('p', { class: 'muted', text: t('scratchCount', { n: scratches }) }) : null,
+      scratches > 0 ? el('p', { class: 'muted', text: t(scratches === 1 ? 'scratchCount1' : 'scratchCount', { n: scratches }) }) : null,
       isBest ? el('p', { class: 'pc-newbest', text: '🏆 ' + t('newBest') }) : el('p', { class: 'muted', text: best === null ? '' : t(best === 1 ? 'bestLine1' : 'bestLine', { n: best }) }),
     );
-    ctx.showModal({
+    endModal?.close();
+    endModal = ctx.showModal({
       title: t('congratulations'),
       body,
       dismissible: false,
       buttons: [
-        { label: t('home'), onClick: () => ctx.exit() },
-        { label: t('changeMode'), onClick: () => showStart() },
-        { label: t('newGame'), primary: true, onClick: () => startGame() },
+        {
+          label: t('home'),
+          onClick: () => {
+            endModal = null;
+            ctx.exit();
+          },
+        },
+        {
+          label: t('changeMode'),
+          onClick: () => {
+            endModal = null;
+            showStart();
+          },
+        },
+        {
+          label: t('newGame'),
+          primary: true,
+          onClick: () => {
+            endModal = null;
+            startGame();
+          },
+        },
       ],
     });
   }
@@ -574,6 +639,7 @@ function create(ctx: GameContext): GameInstance {
     drawTray(g);
     if (game.phase === 'aim') drawGuide(g);
     drawBalls(g);
+    if (game.phase === 'aim' && drag?.kind === 'aim' && drag.g.grab) drawGrabRing(g);
     for (const s of sinks) {
       const p = Math.min(1, s.t / SINK_TIME);
       const k = p * p;
@@ -685,7 +751,7 @@ function create(ctx: GameContext): GameInstance {
       if (i === 0 && inhand) {
         drawBall(g, b.x, b.y, 0, R, 0.8);
         const ring = R + 1.6 + Math.sin(pulse * 5) * 0.6;
-        g.strokeStyle = ctx.cssVar('--accent') || '#5b8cff';
+        g.strokeStyle = colors.accent;
         g.lineWidth = 0.6;
         g.beginPath();
         g.arc(b.x, b.y, ring, 0, TAU);
@@ -850,7 +916,8 @@ function create(ctx: GameContext): GameInstance {
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     const msg = t('placeCue');
-    const y = H - 12;
+    // Mid-table, well clear of the shell toast that shows at the bottom of the screen after a scratch.
+    const y = H * 0.6;
     g.fillStyle = 'rgba(0,0,0,0.35)';
     const tw = g.measureText(msg).width + 8;
     roundRect(g, W / 2 - tw / 2, y - 4, tw, 8, 4);
@@ -860,26 +927,47 @@ function create(ctx: GameContext): GameInstance {
     g.restore();
   }
 
+  /** Faint ring around the cue ball while it is grabbed (slingshot pull: the aim is fixed). */
+  function drawGrabRing(g: CanvasRenderingContext2D): void {
+    if (!game) return;
+    const cue = game.balls[0];
+    g.save();
+    g.globalAlpha = 0.75;
+    g.strokeStyle = colors.accent;
+    g.lineWidth = 0.6;
+    g.beginPath();
+    g.arc(cue.x, cue.y, R + 1.4, 0, TAU);
+    g.stroke();
+    g.restore();
+  }
+
+  /** Vertical power gauge in the gutter right of the table (never over the rail sights or the side pocket). */
   function drawPowerBar(g: CanvasRenderingContext2D): void {
-    const bw = Math.min(RAIL * scale * 0.56, 11);
-    const cx = ox + (W + CUSHION + RAIL * 0.5) * scale;
+    const x = ox + (W + EDGE) * scale + BAR_GAP;
     const top = oy + 14 * scale;
     const bottom = oy + (H - 14) * scale;
     const bh = bottom - top;
     g.save();
-    roundRect(g, cx - bw / 2, top, bw, bh, bw / 2);
-    g.fillStyle = 'rgba(0,0,0,0.42)';
+    roundRect(g, x, top, BAR_W, bh, BAR_W / 2);
+    g.fillStyle = colors.border;
     g.fill();
     if (power > 0) {
-      const fh = Math.max(bw, bh * power);
-      const fg = g.createLinearGradient(0, bottom, 0, top);
-      fg.addColorStop(0, '#3ddc97');
-      fg.addColorStop(0.55, '#ffc857');
-      fg.addColorStop(1, '#ff5470');
-      roundRect(g, cx - bw / 2 + 1, bottom - fh, bw - 2, fh, (bw - 2) / 2);
-      g.fillStyle = fg;
+      const fh = Math.max(BAR_W, bh * power);
+      if (power < FIRE_MIN) {
+        g.fillStyle = colors.muted; // not enough pull to shoot yet
+      } else {
+        const fg = g.createLinearGradient(0, bottom, 0, top);
+        fg.addColorStop(0, colors.success);
+        fg.addColorStop(0.55, colors.warning);
+        fg.addColorStop(1, colors.danger);
+        g.fillStyle = fg;
+      }
+      roundRect(g, x + 1, bottom - fh, BAR_W - 2, fh, (BAR_W - 2) / 2);
       g.fill();
     }
+    // Firing threshold tick.
+    g.fillStyle = colors.muted;
+    g.fillRect(x - 2, bottom - bh * FIRE_MIN - 0.5, BAR_W + 4, 1);
     g.restore();
   }
 
@@ -890,6 +978,7 @@ function create(ctx: GameContext): GameInstance {
   if (import.meta.env.DEV) {
     win.__poolDebug = {
       game: () => game,
+      view: () => ({ scale, ox, oy, aim: aimAngle, power, grab: drag?.kind === 'aim' ? drag.g.grab : null }),
       refresh: () => {
         dirty = true;
         updateHud();

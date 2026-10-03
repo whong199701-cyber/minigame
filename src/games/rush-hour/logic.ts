@@ -10,7 +10,7 @@
  * double for up to 20 vehicles. One move = sliding one vehicle any distance along its axis
  * through free cells.
  */
-import { seededRandom } from '../../app/canvas';
+import { seededRandom, shuffle } from '../../app/canvas';
 import { BANK } from './levels';
 
 export const SIZE = 6;
@@ -51,8 +51,10 @@ export interface Puzzle {
   start: number[];
   /** Optimal number of moves (verified by BFS). */
   par: number;
-  /** True when the puzzle came from the pre-computed bank, false when generated on the fly. */
+  /** True when the puzzle came from the pre-computed bank, false for a remix beyond it. */
   fromBank: boolean;
+  /** Colour rotation for the UI palette (0 for bank levels, 1..12 for remixes). */
+  tint: number;
 }
 
 export interface DifficultySpec {
@@ -259,67 +261,150 @@ export function solve(vehicles: Vehicle[], start: number[], cap = 400000): Solut
 }
 
 /**
- * Explores the whole connected component of `start` and labels every state with its distance to
- * the nearest solved state. Returns null when the component exceeds `cap` states or contains no
- * solved state.
+ * Explores the whole connected component of a start state and labels every state with its
+ * distance to the nearest solved state. The work can be done in slices (`step(budget)`) so the UI
+ * can spread it over several frames; the result is identical however it is sliced.
+ *
+ * Stage 1 is a forward BFS that collects the component and its solved states; stage 2 is a
+ * multi-source BFS from every solved state (moves are reversible, so the graph is undirected).
+ * The result is null when the component exceeds `cap` states or contains no solved state.
  */
+export class DistanceExplorer {
+  private readonly vehicles: Vehicle[];
+  private readonly cap: number;
+  private readonly pos: number[];
+  private readonly grid = new Uint8Array(SIZE * SIZE);
+  private visited: Set<number> | null = new Set<number>();
+  private goals: number[] = [];
+  private queue: number[];
+  private head = 0;
+  private dist: Map<number, number> | null = null;
+  private stage: 'forward' | 'backward' | 'done' = 'forward';
+  private out: Map<number, number> | null = null;
+  /** Number of states expanded so far (both stages). */
+  expanded = 0;
+
+  constructor(vehicles: Vehicle[], start: number[], cap = STATE_CAP) {
+    this.vehicles = vehicles;
+    this.cap = cap;
+    this.pos = new Array<number>(vehicles.length);
+    const key = encodeState(start);
+    this.visited!.add(key);
+    this.queue = [key];
+  }
+
+  get done(): boolean {
+    return this.stage === 'done';
+  }
+
+  /** The distance map once `done` (null when unsolvable or over the cap). */
+  get result(): Map<number, number> | null {
+    return this.out;
+  }
+
+  /** Expands up to `budget` states; returns true once the exploration is complete. */
+  step(budget = Infinity): boolean {
+    let left = budget;
+    while (left > 0 && this.stage !== 'done') {
+      left = this.stage === 'forward' ? this.forward(left) : this.backward(left);
+    }
+    return this.stage === 'done';
+  }
+
+  /** Runs to completion and returns the result. */
+  run(): Map<number, number> | null {
+    this.step();
+    return this.out;
+  }
+
+  private finish(result: Map<number, number> | null): void {
+    this.stage = 'done';
+    this.out = result;
+    this.visited = null;
+    this.dist = null;
+    this.queue = [];
+    this.goals = [];
+  }
+
+  private forward(budget: number): number {
+    const { vehicles, pos, grid, queue, cap } = this;
+    const visited = this.visited!;
+    const n = vehicles.length;
+    let left = budget;
+    while (left > 0 && this.head < queue.length) {
+      left--;
+      this.expanded++;
+      const key = queue[this.head++];
+      decodeState(key, n, pos);
+      if (pos[RED] === GOAL_POS) this.goals.push(key);
+      fillGrid(vehicles, pos, grid);
+      for (let id = 0; id < n; id++) {
+        const { min, max } = slideRange(vehicles, pos, id, grid);
+        const from = pos[id];
+        const mul = POW[id];
+        for (let to = min; to <= max; to++) {
+          if (to === from) continue;
+          const nk = key + (to - from) * mul;
+          if (visited.has(nk)) continue;
+          visited.add(nk);
+          queue.push(nk);
+          if (visited.size > cap) {
+            this.finish(null);
+            return left;
+          }
+        }
+      }
+    }
+    if (this.head >= queue.length) {
+      if (this.goals.length === 0) {
+        this.finish(null);
+        return left;
+      }
+      const dist = new Map<number, number>();
+      for (const g of this.goals) dist.set(g, 0);
+      this.dist = dist;
+      this.queue = this.goals;
+      this.goals = [];
+      this.head = 0;
+      this.visited = null;
+      this.stage = 'backward';
+    }
+    return left;
+  }
+
+  private backward(budget: number): number {
+    const { vehicles, pos, grid, queue } = this;
+    const dist = this.dist!;
+    const n = vehicles.length;
+    let left = budget;
+    while (left > 0 && this.head < queue.length) {
+      left--;
+      this.expanded++;
+      const key = queue[this.head++];
+      const d = dist.get(key)! + 1;
+      decodeState(key, n, pos);
+      fillGrid(vehicles, pos, grid);
+      for (let id = 0; id < n; id++) {
+        const { min, max } = slideRange(vehicles, pos, id, grid);
+        const from = pos[id];
+        const mul = POW[id];
+        for (let to = min; to <= max; to++) {
+          if (to === from) continue;
+          const nk = key + (to - from) * mul;
+          if (dist.has(nk)) continue;
+          dist.set(nk, d);
+          queue.push(nk);
+        }
+      }
+    }
+    if (this.head >= queue.length) this.finish(dist);
+    return left;
+  }
+}
+
+/** Synchronous `DistanceExplorer` run (see there). */
 export function exploreDistances(vehicles: Vehicle[], start: number[], cap = STATE_CAP): Map<number, number> | null {
-  const n = vehicles.length;
-  const visited = new Set<number>();
-  const goals: number[] = [];
-  const startKey = encodeState(start);
-  visited.add(startKey);
-  const queue: number[] = [startKey];
-  const pos = new Array<number>(n);
-  const grid = new Uint8Array(SIZE * SIZE);
-  let head = 0;
-  while (head < queue.length) {
-    const key = queue[head++];
-    decodeState(key, n, pos);
-    if (pos[RED] === GOAL_POS) goals.push(key);
-    fillGrid(vehicles, pos, grid);
-    for (let id = 0; id < n; id++) {
-      const { min, max } = slideRange(vehicles, pos, id, grid);
-      const from = pos[id];
-      const mul = POW[id];
-      for (let to = min; to <= max; to++) {
-        if (to === from) continue;
-        const nk = key + (to - from) * mul;
-        if (visited.has(nk)) continue;
-        visited.add(nk);
-        queue.push(nk);
-        if (visited.size > cap) return null;
-      }
-    }
-  }
-  if (goals.length === 0) return null;
-  // Multi-source BFS from every solved state (moves are reversible, so the graph is undirected).
-  const dist = new Map<number, number>();
-  const q2: number[] = [];
-  for (const g of goals) {
-    dist.set(g, 0);
-    q2.push(g);
-  }
-  head = 0;
-  while (head < q2.length) {
-    const key = q2[head++];
-    const d = dist.get(key)! + 1;
-    decodeState(key, n, pos);
-    fillGrid(vehicles, pos, grid);
-    for (let id = 0; id < n; id++) {
-      const { min, max } = slideRange(vehicles, pos, id, grid);
-      const from = pos[id];
-      const mul = POW[id];
-      for (let to = min; to <= max; to++) {
-        if (to === from) continue;
-        const nk = key + (to - from) * mul;
-        if (dist.has(nk)) continue;
-        dist.set(nk, d);
-        q2.push(nk);
-      }
-    }
-  }
-  return dist;
+  return new DistanceExplorer(vehicles, start, cap).run();
 }
 
 /** Given a distance map, returns a move from `positions` that reduces the distance by one (or null). */
@@ -450,10 +535,8 @@ function pathCells(ev: Evaluated): number[] {
 }
 
 export interface SearchOptions {
-  /** Maximum number of hill-climbing iterations. */
+  /** Maximum number of hill-climbing iterations (the only budget, so results never depend on CPU speed). */
   iterations: number;
-  /** Optional wall-clock budget (ms); makes the search non-deterministic across machines. */
-  timeMs?: number;
   cap?: number;
 }
 
@@ -466,7 +549,6 @@ export interface SearchOptions {
  */
 export function searchLayout(rand: () => number, spec: DifficultySpec, target: number, opts: SearchOptions): Evaluated | null {
   const cap = opts.cap ?? STATE_CAP;
-  const deadline = opts.timeMs ? Date.now() + opts.timeMs : Infinity;
   let ev: Evaluated | null = null;
   for (let i = 0; i < 40 && !ev; i++) {
     ev = evaluateLayout(randomLayout(rand, 4 + Math.floor(rand() * 3), spec.truckRatio), cap);
@@ -477,7 +559,6 @@ export function searchLayout(rand: () => number, spec: DifficultySpec, target: n
   let best = ev;
   for (let it = 0; it < opts.iterations; it++) {
     if (ev.maxDist >= target && fits(ev)) break;
-    if (Date.now() > deadline) break;
     const others = ev.vehicles.length - 1;
     let accepted = false;
     if (others < spec.maxVehicles) {
@@ -532,7 +613,7 @@ export function searchLayout(rand: () => number, spec: DifficultySpec, target: n
 /**
  * Builds one puzzle from a seeded search: runs `searchLayout` toward `target` and picks a start
  * state exactly `target` moves from the exit (or the farthest reachable one when the search fell
- * short). Used offline to build the bank, and online as a fallback beyond it.
+ * short). Used offline to build the level bank.
  */
 export function searchPuzzle(seed: number, spec: DifficultySpec, target: number, opts: SearchOptions): { vehicles: Vehicle[]; start: number[]; par: number } | null {
   const rand = seededRandom(seed);
@@ -550,47 +631,6 @@ export function targetPar(difficulty: Difficulty, level: number): number {
   const steps = 40;
   const k = Math.min(steps, Math.max(1, level)) - 1;
   return spec.minPar + Math.round(((top - spec.minPar) * k) / (steps - 1));
-}
-
-/**
- * On-the-fly generation (fallback for levels beyond the bank). Deterministic for (difficulty,
- * level). First tries random layouts, taking the farthest state whose distance lies in the par
- * range; if none fits after a handful of attempts, hill-climbs toward the range. Never throws:
- * when everything falls short it returns the best effort found, so the game always has a level.
- */
-export function generateOnline(difficulty: Difficulty, level: number): Puzzle {
-  const spec = SPECS[difficulty];
-  const base = hashSeed(difficulty, level);
-  const target = targetPar(difficulty, level);
-  type Candidate = { vehicles: Vehicle[]; start: number[]; par: number };
-  let fallback: Candidate | null = null;
-  const attempts = difficulty === 'easy' || difficulty === 'medium' ? 24 : 6;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    const seed = (base + Math.imul(attempt + 1, 0x9e3779b9)) >>> 0;
-    const rand = seededRandom(seed);
-    const count = spec.minVehicles + Math.floor(rand() * (spec.maxVehicles - spec.minVehicles + 1));
-    const ev = evaluateLayout(randomLayout(rand, count, spec.truckRatio));
-    if (!ev || ev.vehicles.length - 1 < spec.minVehicles) continue;
-    if (ev.maxDist < spec.minPar) {
-      if (!fallback || ev.maxDist > fallback.par) fallback = { vehicles: ev.vehicles, start: ev.far, par: ev.maxDist };
-      continue;
-    }
-    const par = Math.min(ev.maxDist, Math.max(spec.minPar, Math.min(spec.maxPar, target)));
-    const start = pickStateAt(ev, par, rand) ?? ev.far;
-    return { difficulty, level, vehicles: ev.vehicles, start, par: ev.distances.get(encodeState(start)) ?? par, fromBank: false };
-  }
-  // Bounded hill-climb so a phone never stalls for long; the result may fall short of the range.
-  const searched = searchPuzzle(base ^ 0x5bd1e995, spec, target, { iterations: 120, timeMs: 1500 });
-  if (searched && (!fallback || searched.par >= fallback.par)) fallback = searched;
-  if (fallback) return { difficulty, level, vehicles: fallback.vehicles, start: fallback.start, par: fallback.par, fromBank: false };
-  // Practically unreachable: a sparse random layout is always solvable. Keep the game alive anyway.
-  const vehicles: Vehicle[] = [
-    { id: 0, horiz: true, len: 2, lane: EXIT_ROW },
-    { id: 1, horiz: false, len: 3, lane: 3 },
-    { id: 2, horiz: false, len: 2, lane: 5 },
-  ];
-  const start = [0, 0, 1];
-  return { difficulty, level, vehicles, start, par: solve(vehicles, start)?.par ?? 2, fromBank: false };
 }
 
 // ── Compact puzzle strings (level bank) ─────────────────────────────────
@@ -625,29 +665,190 @@ export function bankSize(difficulty: Difficulty): number {
 }
 
 /**
+ * Colour-blind description of a board: two boards that look the same apart from vehicle colours
+ * (i.e. vehicle order) give the same string.
+ */
+export function boardSignature(vehicles: Vehicle[], positions: number[]): string {
+  const parts = vehicles.map((v, i) => `${v.horiz ? 'h' : 'v'}${v.len}${v.lane}${positions[i]}`);
+  return parts[0] + '|' + parts.slice(1).sort().join('');
+}
+
+interface BankEntry {
+  level: number;
+  vehicles: Vehicle[];
+  start: number[];
+  par: number;
+}
+interface BankData {
+  entries: BankEntry[];
+  /** Board signatures of every bank start. */
+  signatures: Set<string>;
+  /** One representative entry per distinct lot (same vehicles in the same lanes), in level order. */
+  lots: BankEntry[];
+  /** Remix order of `lots` for each round (cached). */
+  rounds: number[][];
+}
+const bankCache = new Map<Difficulty, BankData>();
+
+/** Decoded, in-spec bank entries of a difficulty with derived lookup data. */
+function bankData(difficulty: Difficulty): BankData {
+  let data = bankCache.get(difficulty);
+  if (!data) {
+    const spec = SPECS[difficulty];
+    const entries: BankEntry[] = [];
+    BANK[difficulty].forEach((code, i) => {
+      try {
+        const p = decodePuzzle(code);
+        const others = p.vehicles.length - 1;
+        if (p.par < spec.minPar || p.par > spec.maxPar || others < spec.minVehicles || others > spec.maxVehicles) return;
+        entries.push({ level: i + 1, ...p });
+      } catch {
+        /* corrupt entry: skip */
+      }
+    });
+    const lots: BankEntry[] = [];
+    const lotKeys = new Set<string>();
+    for (const e of entries) {
+      const key = lotSignature(e.vehicles);
+      if (lotKeys.has(key)) continue;
+      lotKeys.add(key);
+      lots.push(e);
+    }
+    data = { entries, signatures: new Set(entries.map((e) => boardSignature(e.vehicles, e.start))), lots, rounds: [] };
+    bankCache.set(difficulty, data);
+  }
+  return data;
+}
+
+/** Signature of a lot: which vehicles sit in which lanes, ignoring positions and order. */
+function lotSignature(vehicles: Vehicle[]): string {
+  return vehicles
+    .slice(1)
+    .map((v) => `${v.horiz ? 'h' : 'v'}${v.len}${v.lane}`)
+    .sort()
+    .join('');
+}
+
+/** The pre-computed level, or null when `level` is beyond the bank (or the entry is unusable). */
+export function bankPuzzle(difficulty: Difficulty, level: number): Puzzle | null {
+  const e = bankData(difficulty).entries.find((x) => x.level === level);
+  return e ? { difficulty, level, vehicles: e.vehicles, start: e.start.slice(), par: e.par, fromBank: true, tint: 0 } : null;
+}
+
+/**
+ * Levels beyond the bank are "remixes": a bank lot (each distinct lot is used once per round, in a
+ * seeded order) with a new start state taken from the lot's state space at a distance inside the
+ * difficulty's par range, never a board that already is a bank level or an earlier round of the
+ * same lot, plus a colour rotation. Deterministic for (difficulty, level), independent of timing,
+ * always in range, and it costs one component exploration (≤ STATE_CAP states) that the UI runs in
+ * time slices and then reuses as the hint map.
+ */
+export interface RemixPlan {
+  difficulty: Difficulty;
+  level: number;
+  /** Bank level whose lot is reused. */
+  baseLevel: number;
+  vehicles: Vehicle[];
+  /** The bank start state (exploration starts here). */
+  baseStart: number[];
+  basePar: number;
+  /** Levels of the same lot in earlier rounds (oldest first), whose boards must not repeat. */
+  earlier: number[];
+}
+
+function roundOrder(difficulty: Difficulty, data: BankData, round: number): number[] {
+  let order = data.rounds[round];
+  if (!order) {
+    order = shuffle(
+      data.lots.map((_, i) => i),
+      seededRandom(hashSeed(difficulty + '/round', round)),
+    );
+    data.rounds[round] = order;
+  }
+  return order;
+}
+
+export function remixPlan(difficulty: Difficulty, level: number): RemixPlan {
+  const data = bankData(difficulty);
+  const m = data.lots.length;
+  if (m === 0) throw new Error('rush-hour: empty level bank for ' + difficulty);
+  const first = bankSize(difficulty) + 1;
+  const j = Math.max(0, Math.floor(level) - first);
+  const round = Math.floor(j / m);
+  const lot = roundOrder(difficulty, data, round)[j % m];
+  const earlier: number[] = [];
+  for (let r = 0; r < round; r++) earlier.push(first + r * m + roundOrder(difficulty, data, r).indexOf(lot));
+  const base = data.lots[lot];
+  return { difficulty, level, baseLevel: base.level, vehicles: base.vehicles, baseStart: base.start.slice(), basePar: base.par, earlier };
+}
+
+/**
+ * Chooses the remix start state from the explored distance map of the plan's lot: a seeded distance
+ * inside the par range (preferring at least the base level's par) and, at that distance, the state
+ * that differs most from the bank start among boards not used yet. (A lot with almost no in-range
+ * boards may fall back to its bank start in later rounds; the result is still in range.)
+ */
+export function finishRemix(plan: RemixPlan, distances: Map<number, number> | null): Puzzle {
+  const { difficulty, level, vehicles, baseStart, basePar } = plan;
+  const tint = 1 + (hashSeed(difficulty + '/tint', level) % 12);
+  const fallback: Puzzle = { difficulty, level, vehicles, start: baseStart.slice(), par: basePar, fromBank: false, tint };
+  if (!distances) return fallback;
+  const spec = SPECS[difficulty];
+  const n = vehicles.length;
+  const byDist = new Map<number, number[]>();
+  for (const [key, d] of distances) {
+    if (d < spec.minPar || d > spec.maxPar) continue;
+    const list = byDist.get(d);
+    if (list) list.push(key);
+    else byDist.set(d, [key]);
+  }
+  const all = [...byDist.keys()].sort((a, b) => a - b);
+  const used = new Set(bankData(difficulty).signatures);
+  const pick = (lv: number): { start: number[]; par: number } | null => {
+    const rand = seededRandom(hashSeed(difficulty, lv));
+    const order = [...shuffle(all.filter((d) => d >= basePar), rand), ...shuffle(all.filter((d) => d < basePar), rand)];
+    for (const d of order) {
+      const ranked = byDist.get(d)!.map((key) => {
+        const p = decodeState(key, n);
+        let moved = 0;
+        for (let i = 0; i < n; i++) if (p[i] !== baseStart[i]) moved++;
+        return { p, moved, tie: rand() };
+      });
+      ranked.sort((a, b) => b.moved - a.moved || a.tie - b.tie);
+      for (const c of ranked) {
+        const sig = boardSignature(vehicles, c.p);
+        if (!used.has(sig)) {
+          used.add(sig);
+          return { start: c.p, par: d };
+        }
+      }
+    }
+    return null;
+  };
+  for (const lv of plan.earlier) pick(lv);
+  const chosen = pick(level);
+  return chosen ? { ...fallback, start: chosen.start, par: chosen.par } : fallback;
+}
+
+/** Synchronous remix (plan + exploration + pick). */
+export function remixPuzzle(difficulty: Difficulty, level: number): Puzzle {
+  const plan = remixPlan(difficulty, level);
+  return finishRemix(plan, exploreDistances(plan.vehicles, plan.baseStart));
+}
+
+/**
  * Level `level` (1-based) of a difficulty: the pre-computed bank entry when there is one (built
- * offline by `searchPuzzle` from seed hashSeed(difficulty, level)), else generated on the fly.
+ * offline by `searchPuzzle` from seed hashSeed(difficulty, level)), else a deterministic remix.
  */
 export function getPuzzle(difficulty: Difficulty, level: number): Puzzle {
-  const bank = BANK[difficulty];
-  const code = bank[level - 1];
-  if (code) {
-    try {
-      const { vehicles, start, par } = decodePuzzle(code);
-      return { difficulty, level, vehicles, start, par, fromBank: true };
-    } catch {
-      /* corrupt entry: fall through to online generation */
-    }
-  }
-  return generateOnline(difficulty, level);
+  return bankPuzzle(difficulty, level) ?? remixPuzzle(difficulty, level);
 }
 
 // ── Scoring ──────────────────────────────────────────────────────────────
 
-/** Star rating: 3 for optimal, 2 within par + 3, else 1. */
-export function stars(moves: number, par: number): 1 | 2 | 3 {
-  if (moves <= par) return 3;
-  if (moves <= par + 3) return 2;
-  return 1;
+/** Star rating: 3 for optimal, 2 within par + 3, else 1. A solve that used hints earns at most 2. */
+export function stars(moves: number, par: number, hinted = false): 1 | 2 | 3 {
+  const s = moves <= par ? 3 : moves <= par + 3 ? 2 : 1;
+  return hinted && s === 3 ? 2 : s;
 }
 

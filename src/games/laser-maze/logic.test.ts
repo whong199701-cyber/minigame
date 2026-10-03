@@ -11,8 +11,12 @@ import {
   SPLIT_S,
   TARGET,
   WALL,
+  MIN_TOUCH,
   allTargetsLit,
+  applyWin,
+  boardLayout,
   buildGrid,
+  cellFromPoint,
   cellIndex,
   curveParams,
   fallbackLevel,
@@ -25,6 +29,8 @@ import {
   nextOrient,
   orientOf,
   reflect,
+  restoreBoard,
+  snapshotBoard,
   solve,
   traceBeam,
   type Dir,
@@ -373,5 +379,143 @@ describe('nextOrient', () => {
     expect(nextOrient(undefined)).toBe('/');
     expect(nextOrient('/')).toBe('\\');
     expect(nextOrient('\\')).toBeNull();
+  });
+});
+
+describe('applyWin (progress is computed in one pure step)', () => {
+  it('unlocks the next level, preselects it and stores the first time', () => {
+    const r = applyWin(1, {}, 1, 12.34, 0);
+    expect(r.unlocked).toBe(2);
+    expect(r.selectLevel).toBe(2);
+    expect(r.times).toEqual({ '1': 12.3 });
+    expect(r.timeSaved).toBe(true);
+    expect(r.improvedTime).toBe(false);
+  });
+  it('never lowers the unlocked level when replaying an older one', () => {
+    const r = applyWin(9, { '3': 20 }, 3, 25, 0);
+    expect(r.unlocked).toBe(9);
+    expect(r.selectLevel).toBe(4);
+    expect(r.timeSaved).toBe(false);
+    expect(r.times).toEqual({ '3': 20 });
+  });
+  it('records a faster time as an improvement without mutating the input', () => {
+    const before = { '2': 30 };
+    const r = applyWin(3, before, 2, 18.06, 0);
+    expect(r.times['2']).toBe(18.1);
+    expect(r.improvedTime).toBe(true);
+    expect(before).toEqual({ '2': 30 });
+  });
+  it('hinted clears unlock but never set a time', () => {
+    const r = applyWin(1, {}, 1, 5, 2);
+    expect(r.unlocked).toBe(2);
+    expect(r.timeSaved).toBe(false);
+    expect(r.times).toEqual({});
+  });
+  it('ignores a non-finite elapsed time', () => {
+    const r = applyWin(1, {}, 1, Number.NaN, 0);
+    expect(r.timeSaved).toBe(false);
+    expect(r.unlocked).toBe(2);
+  });
+});
+
+describe('snapshotBoard / restoreBoard', () => {
+  const lv = generateLevel('easy', 3);
+  const empties: number[] = [];
+  const g = buildGrid(lv);
+  for (let i = 0; i < g.length; i++) if (g[i] === EMPTY) empties.push(i);
+  const blocked = g.findIndex((c) => c !== EMPTY);
+
+  it('round-trips mirrors, time and hints through JSON', () => {
+    const placed = new Map<number, Orient>([
+      [empties[0], '/'],
+      [empties[5], '\\'],
+    ]);
+    const snap = JSON.parse(JSON.stringify(snapshotBoard(3, lv, placed, 42.26, 1)));
+    const r = restoreBoard(snap, 3, lv);
+    expect(r).not.toBeNull();
+    expect([...r!.placed.entries()]).toEqual([...placed.entries()]);
+    expect(r!.elapsed).toBe(42.3);
+    expect(r!.hints).toBe(1);
+  });
+  it('rejects boards of another level or seed', () => {
+    const snap = snapshotBoard(3, lv, new Map([[empties[0], '/']]), 1, 0);
+    expect(restoreBoard(snap, 4, lv)).toBeNull();
+    expect(restoreBoard({ ...snap, seed: lv.seed + 1 }, 3, lv)).toBeNull();
+  });
+  it('rejects garbage, blocked cells, duplicates and over-budget boards', () => {
+    const base = { level: 3, seed: lv.seed, elapsed: 0, hints: 0 };
+    expect(restoreBoard(null, 3, lv)).toBeNull();
+    expect(restoreBoard('x', 3, lv)).toBeNull();
+    expect(restoreBoard({ ...base, placed: 'nope' }, 3, lv)).toBeNull();
+    expect(restoreBoard({ ...base, placed: [[blocked, '/']] }, 3, lv)).toBeNull();
+    expect(restoreBoard({ ...base, placed: [[empties[0], 'x']] }, 3, lv)).toBeNull();
+    expect(restoreBoard({ ...base, placed: [[-1, '/']] }, 3, lv)).toBeNull();
+    expect(restoreBoard({ ...base, placed: [[1.5, '/']] }, 3, lv)).toBeNull();
+    expect(
+      restoreBoard(
+        {
+          ...base,
+          placed: [
+            [empties[0], '/'],
+            [empties[0], '\\'],
+          ],
+        },
+        3,
+        lv,
+      ),
+    ).toBeNull();
+    const tooMany = empties.slice(0, lv.mirrors + 1).map((k) => [k, '/']);
+    expect(restoreBoard({ ...base, placed: tooMany }, 3, lv)).toBeNull();
+  });
+  it('sanitises time and hints', () => {
+    const r = restoreBoard({ level: 3, seed: lv.seed, placed: [], elapsed: -5, hints: 'a' }, 3, lv);
+    expect(r).toEqual({ placed: new Map(), elapsed: 0, hints: 0 });
+    const r2 = restoreBoard({ level: 3, seed: lv.seed, placed: [], elapsed: Infinity, hints: 2.7 }, 3, lv);
+    expect(r2!.elapsed).toBe(0);
+    expect(r2!.hints).toBe(2);
+  });
+});
+
+describe('boardLayout / cellFromPoint', () => {
+  it('keeps 9x9 cells as large as the width allows on a 390 px phone', () => {
+    const l = boardLayout(390, 546, 9);
+    expect(l.cell).toBe(43);
+    expect(l.ox).toBeGreaterThanOrEqual(1);
+    expect(l.ox + 9 * l.cell).toBeLessThanOrEqual(390);
+  });
+  it('keeps a 6 px frame when the cells are big enough anyway', () => {
+    const l = boardLayout(390, 546, 6);
+    expect(l.cell).toBe(63);
+    expect(l.ox).toBeGreaterThanOrEqual(6);
+  });
+  it('fits the height-limited landscape area and caps very large cells', () => {
+    const l = boardLayout(690, 334, 9);
+    expect(l.cell).toBe(36);
+    expect(l.oy + 9 * l.cell).toBeLessThanOrEqual(334);
+    expect(boardLayout(2000, 2000, 6).cell).toBe(64);
+    expect(boardLayout(1, 1, 9).cell).toBe(8);
+  });
+  it('the board always fits and cells reach the touch target whenever the space allows', () => {
+    for (const n of [6, 7, 8, 9]) {
+      for (let w = 200; w <= 900; w += 37) {
+        for (let h = 200; h <= 900; h += 41) {
+          const l = boardLayout(w, h, n);
+          expect(l.ox).toBeGreaterThanOrEqual(0);
+          expect(l.oy).toBeGreaterThanOrEqual(0);
+          expect(l.ox + n * l.cell).toBeLessThanOrEqual(w);
+          expect(l.oy + n * l.cell).toBeLessThanOrEqual(h);
+          if (Math.min(w, h) - 2 >= MIN_TOUCH * n) expect(l.cell).toBeGreaterThanOrEqual(MIN_TOUCH);
+        }
+      }
+    }
+  });
+  it('maps points to cells and snaps near misses to the edge cells', () => {
+    const l = { cell: 40, ox: 10, oy: 20 };
+    expect(cellFromPoint(10 + 40 * 2 + 5, 20 + 40 * 3 + 39, l, 6)).toBe(cellIndex(6, 2, 3));
+    expect(cellFromPoint(5, 25, l, 6)).toBe(cellIndex(6, 0, 0));
+    expect(cellFromPoint(10 + 240 + 10, 20 + 240 + 10, l, 6)).toBe(cellIndex(6, 5, 5));
+    expect(cellFromPoint(10 - 20, 30, l, 6)).toBe(-1);
+    expect(cellFromPoint(30, 20 + 240 + 20, l, 6)).toBe(-1);
+    expect(cellFromPoint(Number.NaN, 30, l, 6)).toBe(-1);
   });
 });

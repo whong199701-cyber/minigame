@@ -218,3 +218,14 @@
   color: var(--warning);
   font-weight: 700;
 }
+.mg-card-legend {
+  font-size: 11px;
+  text-align: right;
+  margin-top: -4px;
+}
+.mg-hud {
+  cursor: pointer;
+}
+.mg-hud .stat-value.mg-over {
+  color: var(--danger);
+}

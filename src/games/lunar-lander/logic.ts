@@ -18,8 +18,8 @@ export const MIN_GROUND = 6;
 export const MAX_GROUND = 55;
 /** Main engine acceleration (m/s²) at full throttle. */
 export const THRUST = 5.5;
-/** Maximum angular velocity (rad/s) while a rotate button is held. */
-export const ROT_SPEED = 1.7;
+/** Maximum angular velocity (rad/s) while a rotate button is held (~86°/s: quick taps give fine trim). */
+export const ROT_SPEED = 1.5;
 /** How quickly the angular velocity reaches its target (1/s). */
 export const ROT_RESPONSE = 14;
 export const MAX_VY = 2.5;
@@ -35,8 +35,19 @@ export const CAMPAIGN_LEVELS = 10;
 export const PAD_WIDTHS: Record<number, number> = { 1: 22, 2: 14, 3: 9 };
 /** Horizontal slack (m) allowed for a foot at the pad edge. */
 export const PAD_TOLERANCE = 0.3;
+/**
+ * Vertical slack (m) between the pad surface and the ground a foot rests on. A foot over a raised rim right next
+ * to the pad (higher than this) or touching lower ground beside it is not "on the pad".
+ */
+export const PAD_LEVEL_TOL = 0.25;
+/** Ground steeper than this (rise / run) is a cliff or crater wall rather than rough ground. */
+export const CLIFF_SLOPE = 1;
 /** The lander is considered "lost" above this altitude. */
 export const CEILING = 500;
+/** Minimum world height (m) the overview camera keeps in view, so the ground is visible from the start. */
+export const VIEW_H_MIN = 140;
+/** Exhaust reaches the ground (kicking up dust) within this distance of the nozzle. */
+export const EXHAUST_REACH = 14;
 
 /** Lander geometry in local metres (x right, y up, origin at the centre of mass). */
 export const FOOT_X = 3.0;
@@ -117,7 +128,7 @@ export interface Input {
   rot: number;
 }
 
-export type CrashReason = 'terrain' | 'offPad' | 'vspeed' | 'hspeed' | 'tilt' | 'hull' | 'lost';
+export type CrashReason = 'terrain' | 'cliff' | 'offPad' | 'vspeed' | 'hspeed' | 'tilt' | 'hull' | 'lost';
 
 export type Contact =
   | { kind: 'none' }
@@ -216,7 +227,7 @@ export function levelConfig(level: number): LevelConfig {
   const gravity = Math.min(3.4, 1.6 + ((c - 1) * 1.4) / 9 + extra * 0.05);
   const wind = n >= 6 ? Math.min(0.55, 0.18 + (n - 6) * 0.06) : 0;
   const roughness = Math.min(26, 9 + (c - 1) * 1.6 + extra * 0.5);
-  const fuelMargin = Math.max(1.5, 2.8 - ((c - 1) * 1.3) / 9);
+  const fuelMargin = Math.max(1.4, 2.8 - ((c - 1) * 1.2) / 9 - extra * 0.02);
   const startVx = Math.min(8, 3 + (c - 1) * 0.5 + extra * 0.1);
   return { level: n, gravity, wind, pads: padsFor(n), roughness, fuelMargin, startVx };
 }
@@ -381,17 +392,44 @@ export function altitudeAbove(l: Lander, terrain: Terrain): number {
   return Math.max(0, l.y + FOOT_Y - g);
 }
 
-function footOnPad(f: Point, p: Pad): boolean {
+function footOverPad(f: Point, p: Pad): boolean {
   return f.x >= p.x0 - PAD_TOLERANCE && f.x <= p.x1 + PAD_TOLERANCE;
+}
+
+/**
+ * A foot counts as on the pad when it is over the pad (with a little edge slack), the ground beneath it is not
+ * raised above the pad surface (a rim right next to the pad edge) and, if it is resting on the ground, that
+ * ground is level with the pad (not lower ground just past the edge).
+ */
+export function footOnPad(f: Point, p: Pad, terrain: Terrain): boolean {
+  if (!footOverPad(f, p)) return false;
+  const ground = heightAt(terrain, f.x);
+  if (ground > p.y + PAD_LEVEL_TOL) return false;
+  const resting = f.y <= ground + 1e-6;
+  return !resting || ground >= p.y - PAD_LEVEL_TOL;
+}
+
+/** Local steepness (rise / run) of the terrain around x. */
+export function slopeAt(terrain: Terrain, x: number, h = 0.25): number {
+  const x0 = Math.max(0, x - h);
+  const x1 = Math.min(terrain.width, x + h);
+  if (x1 <= x0) return 0;
+  return Math.abs(heightAt(terrain, x1) - heightAt(terrain, x0)) / (x1 - x0);
 }
 
 /** Judge a touchdown: both feet on one pad, gentle, level. */
 export function evaluateLanding(l: Lander, terrain: Terrain, feet: Point[] = FEET.map((p) => toWorld(l, p))): LandingCheck {
-  const pad = terrain.pads.find((p) => feet.every((f) => footOnPad(f, p))) ?? null;
+  const pad = terrain.pads.find((p) => feet.every((f) => footOnPad(f, p, terrain))) ?? null;
   const reasons: CrashReason[] = [];
   if (!pad) {
-    const partly = terrain.pads.some((p) => feet.some((f) => footOnPad(f, p)));
-    reasons.push(partly ? 'offPad' : 'terrain');
+    const partly = terrain.pads.some((p) => feet.some((f) => footOverPad(f, p)));
+    if (partly) reasons.push('offPad');
+    else {
+      // The foot that met the ground (or the lowest one) decides between a steep wall and rough ground.
+      const ground = feet.filter((f) => f.y <= heightAt(terrain, f.x) + 1e-6);
+      const hit = ground.length ? ground : [feet.reduce((a, b) => (b.y < a.y ? b : a))];
+      reasons.push(hit.some((f) => slopeAt(terrain, f.x) > CLIFF_SLOPE) ? 'cliff' : 'terrain');
+    }
   }
   if (Math.abs(l.vy) > MAX_VY) reasons.push('vspeed');
   if (Math.abs(l.vx) > MAX_VX) reasons.push('hspeed');
@@ -533,7 +571,57 @@ export function stepLevel(lv: Level, input: Input, dt = DT): 'landed' | 'crashed
   return 'crashed';
 }
 
+// ── Campaign run (persisted progress) ─────────────────────────────────────
+export interface Run {
+  /** Next level to fly. */
+  level: number;
+  /** Campaign score banked so far. */
+  score: number;
+  /** Seed of this campaign's terrain. */
+  seed: number;
+}
+
+/** Validate a stored campaign run; anything malformed becomes null. */
+export function sanitizeRun(raw: unknown): Run | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const { level, score, seed } = r;
+  if (typeof level !== 'number' || typeof score !== 'number' || typeof seed !== 'number') return null;
+  if (!Number.isFinite(level) || !Number.isFinite(score) || !Number.isFinite(seed)) return null;
+  return { level: Math.max(1, Math.floor(level)), score: Math.max(0, Math.round(score)), seed: seed >>> 0 };
+}
+
+// ── Exhaust ───────────────────────────────────────────────────────────────
+/** Where the exhaust plume meets the ground (marching along the thrust axis), or null if out of reach. */
+export function exhaustGroundHit(l: Lander, terrain: Terrain, reach = EXHAUST_REACH): { x: number; y: number; d: number } | null {
+  const n = toWorld(l, [0, -2.3]);
+  const dx = -Math.sin(l.angle);
+  const dy = -Math.cos(l.angle);
+  for (let d = 0; d <= reach; d += 0.5) {
+    const x = n.x + dx * d;
+    const y = n.y + dy * d;
+    if (x < 0 || x > terrain.width) return null;
+    if (y <= heightAt(terrain, x)) return { x, y: heightAt(terrain, x), d };
+  }
+  return null;
+}
+
 // ── Camera helper ─────────────────────────────────────────────────────────
+/**
+ * Camera centre height (m) for a view `viewH` metres tall: the lowest visible ground sits near the bottom
+ * (22 % margin), the lander stays at least 20 % below the top edge, and nothing far below y = -6 is shown.
+ */
+export function cameraTargetY(landerY: number, groundLow: number, viewH: number): number {
+  const groundAnchored = groundLow - viewH * 0.22 + viewH / 2;
+  const followLander = landerY + viewH * 0.2 - viewH / 2;
+  return Math.max(groundAnchored, followLander, -6 + viewH / 2);
+}
+
+/** Overview zoom (px per metre): the whole level width and the descent column both fit the view. */
+export function overviewZoom(w: number, h: number): number {
+  return Math.max(0.5, Math.min(w / WORLD_W, h / VIEW_H_MIN));
+}
+
 /** Target zoom (px per metre): wide overview high up, close-up near the ground. */
 export function zoomFor(altitude: number, near: number, far: number, lo = 18, hi = 75): number {
   const t = smoothstep((altitude - lo) / (hi - lo));

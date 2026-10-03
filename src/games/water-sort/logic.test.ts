@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { seededRandom } from '../../app/canvas';
 import {
   CAP,
+  MAX_COLOURS,
   applyPour,
   canPour,
+  challengeParFor,
+  climbBoard,
   colourCountFor,
   countBlocks,
   emptyCountFor,
@@ -24,6 +27,7 @@ import {
   solveForPlay,
   starsFor,
   stateKey,
+  targetParFor,
   topRun,
   type Move,
   type State,
@@ -172,6 +176,30 @@ describe('state key & heuristic', () => {
   it('is independent of tube order', () => {
     expect(stateKey([[0, 1], [], [2]])).toBe(stateKey([[2], [0, 1], []]));
     expect(stateKey([[0, 1], [2]])).not.toBe(stateKey([[1, 0], [2]]));
+    const big: State = [];
+    for (let c = 0; c < MAX_COLOURS; c++) big.push([c, (c + 1) % MAX_COLOURS, c, (c + 5) % MAX_COLOURS]);
+    big.push([], [3]);
+    const shuffled = big.slice().reverse();
+    [shuffled[0], shuffled[7]] = [shuffled[7], shuffled[0]];
+    expect(stateKey(shuffled)).toBe(stateKey(big));
+  });
+  it('gives every possible tube its own key (all lengths 0..CAP, all colours)', () => {
+    const seen = new Set<string>();
+    let tubes: number[][] = [[]];
+    let total = 0;
+    for (let len = 0; len <= CAP; len++) {
+      for (const t of tubes) {
+        seen.add(stateKey([t]));
+        total++;
+      }
+      const next: number[][] = [];
+      for (const t of tubes) for (let c = 0; c < MAX_COLOURS; c++) next.push([...t, c]);
+      tubes = next;
+    }
+    expect(seen.size).toBe(total);
+    // multisets of tubes: same tubes in a different split must not collide either
+    expect(stateKey([[0, 1], [2]])).not.toBe(stateKey([[0], [1, 2]]));
+    expect(stateKey([[0], [0]])).not.toBe(stateKey([[0, 0], []]));
   });
   it('heuristic is zero on solved states and positive otherwise', () => {
     expect(heuristic([[0, 0, 0, 0], [1, 1, 1, 1], []])).toBe(0);
@@ -337,6 +365,11 @@ describe('generateLevel', () => {
     expect(a.tubes).toEqual(b.tubes);
     expect(a.par).toBe(b.par);
     expect(a.solution).toEqual(b.solution);
+    expect(a.work).toBe(b.work);
+    const c = generateLevel(220);
+    const d = generateLevel(220);
+    expect(c.tubes).toEqual(d.tubes);
+    expect(c.solution).toEqual(d.solution);
   });
   it('clamps invalid levels to 1', () => {
     expect(generateLevel(0).level).toBe(1);
@@ -357,23 +390,102 @@ describe('generateLevel', () => {
       expect(L.tubes.some(isComplete)).toBe(false);
       expect(isSolved(L.tubes)).toBe(false);
       expect(L.par).toBe(L.solution.length);
-      expect(L.par).toBeGreaterThanOrEqual(L.fallback ? 8 : minParFor(L.colours));
+      // no relaxation for any generation path: every level clears the triviality bar
+      expect(L.par).toBeGreaterThanOrEqual(minParFor(L.colours));
       // the stored solution really solves the level
       expect(isSolved(play(L.tubes, L.solution))).toBe(true);
     }
   });
   it('high levels (10–12 colours, including challenge levels) are solvable', () => {
-    for (const lv of [91, 100, 117, 130, 150, 181, 200, 333]) {
+    for (const lv of [91, 100, 117, 130, 150, 181, 200, 219, 221, 333]) {
       const L = generateLevel(lv);
       expect(L.colours).toBe(colourCountFor(lv));
+      expect(L.tubes.filter((t) => t.length === 0)).toHaveLength(emptyCountFor(lv));
+      expect(L.tubes.some(isComplete)).toBe(false);
       expect(isSolved(play(L.tubes, L.solution))).toBe(true);
-      expect(L.par).toBeGreaterThanOrEqual(10);
+      expect(L.par).toBeGreaterThanOrEqual(minParFor(L.colours));
     }
   });
-  it('generation is fast enough to run on tap', () => {
-    const t0 = performance.now();
-    for (const lv of [5, 33, 80, 120, 250]) generateLevel(lv);
-    expect(performance.now() - t0).toBeLessThan(2000);
+  it('the par of a high level is the exact optimum (A* re-check)', () => {
+    for (const lv of [100, 220]) {
+      const L = generateLevel(lv);
+      const r = solve(L.tubes, { maxNodes: 200000, weight: 1 });
+      expect(r.status).toBe('solved');
+      if (r.status === 'solved') expect(r.moves.length).toBe(L.par);
+    }
+  });
+  it(
+    'challenge levels (every 10th, one empty tube) are not trivial and about as long as their neighbours',
+    () => {
+      const ratios: number[] = [];
+      for (let lv = 10; lv <= 300; lv += 10) {
+        const L = generateLevel(lv);
+        expect(L.empties).toBe(1);
+        expect(L.tubes.filter((t) => t.length === 0)).toHaveLength(1);
+        expect(L.tubes.some(isComplete)).toBe(false);
+        expect(isSolved(play(L.tubes, L.solution))).toBe(true);
+        expect(targetParFor(lv)).toBe(challengeParFor(L.colours));
+        // the climb may settle one move short of its goal after its node budget
+        expect(L.par).toBeGreaterThanOrEqual(challengeParFor(L.colours) - 1);
+        expect(L.par).toBeGreaterThan(minParFor(L.colours));
+        const around = (generateLevel(lv - 1).par + generateLevel(lv + 1).par) / 2;
+        ratios.push(L.par / around);
+      }
+      // regression guard for the old reverse-walk fallback (L220: par 16 next to 40 and 36)
+      for (const r of ratios) expect(r).toBeGreaterThanOrEqual(0.8);
+      expect(ratios.reduce((a, b) => a + b, 0) / ratios.length).toBeGreaterThanOrEqual(0.9);
+    },
+    120000,
+  );
+  it('generation cost is bounded (solver nodes, independent of machine load)', () => {
+    for (const lv of [5, 33, 80, 120, 190, 250, 320, 330, 1000]) {
+      const L = generateLevel(lv);
+      expect(L.work).toBeGreaterThan(0);
+      expect(L.work).toBeLessThan(40000);
+    }
+  });
+});
+
+describe('climbBoard', () => {
+  it('builds a solvable, untouched board whose par reaches the goal', () => {
+    for (const [colours, empties, seed] of [
+      [6, 1, 11],
+      [9, 1, 12],
+      [12, 1, 13],
+      [8, 2, 14],
+    ]) {
+      const goal = challengeParFor(colours);
+      const r = climbBoard(colours, empties, seededRandom(seed), goal, minParFor(colours));
+      expect(r).not.toBeNull();
+      if (!r) continue;
+      expect(r.tubes).toHaveLength(colours + empties);
+      expect(r.tubes.filter((t) => t.length === 0)).toHaveLength(empties);
+      for (const t of r.tubes) expect(t.length === 0 || t.length === CAP).toBe(true);
+      const counts = unitCounts(r.tubes);
+      expect(counts.size).toBe(colours);
+      for (const n of counts.values()) expect(n).toBe(CAP);
+      expect(r.tubes.some(isComplete)).toBe(false);
+      expect(r.moves.length).toBeGreaterThanOrEqual(goal - 1);
+      expect(isSolved(play(r.tubes, r.moves))).toBe(true);
+      // the reported solution is optimal
+      const check = solve(r.tubes, { maxNodes: 200000 });
+      expect(check.status).toBe('solved');
+      if (check.status === 'solved') expect(check.moves.length).toBe(r.moves.length);
+      expect(r.work).toBeGreaterThan(0);
+    }
+  });
+  it('is deterministic for a given seed', () => {
+    const a = climbBoard(10, 1, seededRandom(5), 30, 20);
+    const b = climbBoard(10, 1, seededRandom(5), 30, 20);
+    expect(a).toEqual(b);
+  });
+  it('settles for the floor when the goal is out of reach', () => {
+    const r = climbBoard(4, 1, seededRandom(3), 1000, 8);
+    expect(r).not.toBeNull();
+    if (r) {
+      expect(r.moves.length).toBeGreaterThanOrEqual(8);
+      expect(isSolved(play(r.tubes, r.moves))).toBe(true);
+    }
   });
 });
 

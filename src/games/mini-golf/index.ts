@@ -1,6 +1,6 @@
 import type { GameContext, GameInstance, GameModule, SoundName, ThemeName } from '../../app/types';
 import { el, button, segmented } from '../../app/ui';
-import { createCanvas, createLoop, onPointer, seededRandom, type CanvasHandle } from '../../app/canvas';
+import { clamp, createCanvas, createLoop, onPointer, seededRandom, type CanvasHandle, type PointerInfo } from '../../app/canvas';
 import {
   BALL_R,
   CUP_R,
@@ -13,8 +13,10 @@ import {
   aimFromDrag,
   formatVsPar,
   holeScore,
+  isValidProgress,
   moverRect,
   newSim,
+  pointInPoly,
   predictPath,
   scoreTerm,
   shoot,
@@ -26,6 +28,8 @@ import {
   type DiffConfig,
   type Difficulty,
   type Hole,
+  type Progress,
+  type Rect,
   type SimState,
   type Vec,
 } from './logic';
@@ -34,29 +38,30 @@ import './style.css';
 const strings = {
   zh: {
     rules:
-      '从球的后方拖动，像弹弓一样拉开：虚线显示方向，光环与力度条显示力量，松手推杆；拖回球上可取消。\n球停稳后才能再次击球。球速适中时经过球洞才会落袋，太快会直接飞过。\n沙地阻力很大；落水则球回到上一停点并罚 1 杆；加速带会推动球；移动挡板需要掐准时机。\n每洞最多 8 杆，用完则罚 1 杆并进入下一洞。进度会自动保存。\n目标：18 洞总杆数尽量少，低于标准杆最佳。\n休闲：显示到首次反弹的预测路线，球洞更宽容；标准：只显示方向虚线；职业：仅短箭头，必须轻推入洞，沙地更黏。',
-    desc: '18 洞物理推杆：弹弓式拖拽，沙坑、水塘、弹珠与移动挡板。',
+      '像弹弓一样向后拖动、松手推杆：可按住球拖，也可在球场任意处按下拖动。虚线指方向，球周光环与顶部力度条显示力量；拖回起点即取消。\n球停稳后才能再击球。球心经过球洞且速度适中才会落袋，太快会飞过。\n沙地很慢；落水罚 1 杆并回到上次停球处；黄色箭头带会推球（有的是侧风）；移动挡板要掐时机；橙色弹珠会弹开球。\n每洞最多 8 杆，仍未进洞记 9 杆并进入下一洞。进度自动保存。\n目标：18 洞总杆数越少越好，低于标准杆即为高手。\n休闲：预测首次反弹路线，球洞宽容，沙地较松。\n标准：只显示方向虚线。\n职业：只有短箭头，须轻推入洞，沙地更黏。',
+    desc: '18 洞物理推杆：弹弓式拖拽，沙坑、水塘、弹珠、侧风与移动挡板。',
     casual: '休闲',
     standard: '标准',
     pro: '职业',
     casualDesc: '预测反弹路线 · 球洞宽容',
     standardDesc: '方向虚线 · 标准球洞',
     proDesc: '仅短箭头 · 必须轻推入洞',
-    continueRound: '继续 · 第 {n} 洞',
+    continueRound: '继续 · {d} · 第 {n} 洞',
     newRound: '新一轮',
     bestTotal: '最佳：{n} 杆（{d}）',
+    bestValue: '{n} 杆（{d}）',
     noBest: '尚无纪录',
     holeLabel: '洞',
     parLabel: '标准杆',
     strokesLabel: '杆数',
     totalLabel: '总计',
     statusLine: '{n}/{total} 洞 · 标准杆 {par}',
-    statusBest: ' · 最佳 {b}',
+    statusBest: ' · 本洞最佳 {b}',
     holeOf: '第 {n} 洞',
     parN: '标准杆 {n}',
-    dragHint: '从球向后拖动瞄准 · 松手推杆',
+    dragHint: '向后拖动瞄准 · 松手推杆',
     waterMsg: '落水！罚 1 杆',
-    maxStrokesMsg: '已达 8 杆上限，罚 1 杆',
+    maxStrokesMsg: '已用满 8 杆，本洞记 9 杆',
     rescued: '球被卡住，已放回原位',
     holeInOne: '一杆进洞！',
     albatross: '信天翁！',
@@ -71,11 +76,12 @@ const strings = {
     scorecard: '记分卡',
     roundDone: '18 洞完成！',
     totalStrokes: '总杆数',
-    courseParLabel: '球场标准杆',
+    courseParLabel: '标准杆',
     vsParLabel: '相对标准杆',
     bestRound: '最佳纪录',
-    restartConfirm: '放弃当前进度并重新开始这一轮？',
+    restartConfirm: '放弃当前进度，从第 1 洞重新开始？',
     holeBestNote: '本洞新纪录',
+    cellBest: '最佳',
     name1: '开球',
     name2: '狗腿弯',
     name3: '弹珠阵',
@@ -83,7 +89,7 @@ const strings = {
     name5: '过水',
     name6: '之字形',
     name7: '斜角反弹',
-    name8: '加速带',
+    name8: '侧风带',
     name9: '移动闸门',
     name10: '沙岛',
     name11: '迷宫',
@@ -97,29 +103,30 @@ const strings = {
   },
   en: {
     rules:
-      'Drag back from the ball like a slingshot: the dotted line shows direction, the ring and bar show power; release to putt. Drag back onto the ball to cancel.\nYou can only putt once the ball has stopped. The ball drops only when it crosses the cup at moderate speed — too fast and it skips over.\nSand is slow; water returns the ball to its last stop with a 1-stroke penalty; boosters push the ball; moving gates need timing.\nMax 8 strokes per hole — after that you take a 1-stroke penalty and move on. Progress is saved automatically.\nGoal: the lowest 18-hole total. Beat par!\nCasual: predicted path up to the first bounce and a forgiving cup. Standard: direction line only. Pro: short arrow only, the cup needs a gentle touch and sand is stickier.',
-    desc: '18 holes of physics putting: slingshot drag, bunkers, water, bumpers and moving gates.',
+      'Pull back like a slingshot and let go to putt — from the ball, or press anywhere on the course and drag. The dotted line shows direction; the ring and top bar show power. Drag back to your start point to cancel.\nPutt only when the ball has stopped. It drops if its centre crosses the cup at moderate speed; too fast and it skips over.\nSand is slow; water costs 1 stroke and returns the ball to where it last stopped; yellow arrows push the ball (some sideways); time the moving gates; orange bumpers bounce.\nMax 8 strokes per hole, otherwise it scores 9. Progress is saved.\nGoal: the lowest 18-hole total — beat par.\nCasual: first-bounce path preview, forgiving cup, softer sand.\nStandard: direction line only.\nPro: short arrow only, gentle touch to sink, stickier sand.',
+    desc: '18 holes of physics putting: slingshot drag, bunkers, water, bumpers, crosswinds and moving gates.',
     casual: 'Casual',
     standard: 'Standard',
     pro: 'Pro',
     casualDesc: 'Bounce preview · forgiving cup',
     standardDesc: 'Direction line · standard cup',
     proDesc: 'Short arrow only · gentle touch required',
-    continueRound: 'Continue · hole {n}',
+    continueRound: 'Continue · {d} · hole {n}',
     newRound: 'New round',
     bestTotal: 'Best: {n} strokes ({d})',
+    bestValue: '{n} strokes ({d})',
     noBest: 'No record yet',
     holeLabel: 'Hole',
     parLabel: 'Par',
     strokesLabel: 'Strokes',
     totalLabel: 'Total',
     statusLine: 'Hole {n}/{total} · Par {par}',
-    statusBest: ' · best {b}',
+    statusBest: ' · hole best {b}',
     holeOf: 'Hole {n}',
     parN: 'Par {n}',
-    dragHint: 'Drag back from the ball to aim · release to putt',
+    dragHint: 'Drag back to aim · release to putt',
     waterMsg: 'Splash! +1 stroke',
-    maxStrokesMsg: 'Stroke limit reached: +1 penalty',
+    maxStrokesMsg: '8 strokes used: this hole scores 9',
     rescued: 'Ball was stuck — placed back',
     holeInOne: 'Hole in one!',
     albatross: 'Albatross!',
@@ -134,11 +141,12 @@ const strings = {
     scorecard: 'Scorecard',
     roundDone: 'Round complete!',
     totalStrokes: 'Total strokes',
-    courseParLabel: 'Course par',
+    courseParLabel: 'Par',
     vsParLabel: 'Versus par',
     bestRound: 'Best round',
-    restartConfirm: 'Abandon the current round and start over?',
+    restartConfirm: 'Abandon this round and start again from hole 1?',
     holeBestNote: 'New hole record',
+    cellBest: 'best',
     name1: 'Tee Off',
     name2: 'Dogleg',
     name3: 'Bumper Alley',
@@ -146,7 +154,7 @@ const strings = {
     name5: 'Water Carry',
     name6: 'Zigzag',
     name7: 'Bank Shot',
-    name8: 'Booster',
+    name8: 'Crosswind',
     name9: 'Moving Gate',
     name10: 'Sand Island',
     name11: 'The Maze',
@@ -159,14 +167,6 @@ const strings = {
     name18: 'Grand Finale',
   },
 };
-
-interface Progress {
-  diff: Difficulty;
-  hole: number;
-  scores: number[];
-  strokes: number;
-  ball: Vec;
-}
 
 interface Particle {
   x: number;
@@ -184,8 +184,10 @@ interface Palette {
   felt: string;
   stripe: string;
   fringe: string;
+  tee: string;
   wall: string;
   wallEdge: string;
+  wallTop: string;
   sand: string;
   sandDot: string;
   water: string;
@@ -201,6 +203,7 @@ interface Palette {
   ballShade: string;
   shadow: string;
   aim: string;
+  band: string;
   flag: string;
   pole: string;
   success: string;
@@ -223,53 +226,63 @@ function makePalette(theme: ThemeName, cssVar: (n: string) => string): Palette {
       felt: '#2e7d47',
       stripe: 'rgba(255,255,255,0.045)',
       fringe: '#3c9a59',
+      tee: 'rgba(255,255,255,0.10)',
       wall: '#7a5238',
       wallEdge: '#3d2819',
+      wallTop: 'rgba(255,214,170,0.28)',
       sand: '#cdb77d',
       sandDot: '#ad9759',
       water: '#2a63c4',
       waterLine: 'rgba(255,255,255,0.35)',
-      boost: 'rgba(255,200,80,0.28)',
+      boost: 'rgba(255,200,80,0.24)',
       boostChev: '#ffd166',
       bumper: '#ff7a59',
       bumperCore: '#ffb59e',
       bumperRing: '#ffd166',
-      cup: '#0a0d12',
+      cup: '#06080c',
       cupRim: '#1c2430',
       ball: '#f8f8f3',
       ballShade: '#b9b9b0',
       shadow: 'rgba(0,0,0,0.4)',
       aim: 'rgba(255,255,255,0.92)',
+      band: 'rgba(255,255,255,0.32)',
       flag: '#ff5470',
       pole: '#e8ecf3',
     };
   }
   return {
     ...common,
-    felt: '#56b56a',
+    felt: '#4fae63',
     stripe: 'rgba(255,255,255,0.09)',
-    fringe: '#7fd090',
+    fringe: '#79cc8b',
+    tee: 'rgba(255,255,255,0.22)',
     wall: '#8d5b3b',
     wallEdge: '#5a3822',
+    wallTop: 'rgba(255,226,190,0.4)',
     sand: '#ead9a2',
     sandDot: '#c9b273',
     water: '#4b94f2',
     waterLine: 'rgba(255,255,255,0.55)',
-    boost: 'rgba(255,170,40,0.3)',
+    boost: 'rgba(255,170,40,0.28)',
     boostChev: '#ff9f1c',
     bumper: '#ff6a3d',
     bumperCore: '#ffb096',
     bumperRing: '#ffb703',
-    cup: '#1a2230',
+    cup: '#141b26',
     cupRim: '#3a4759',
     ball: '#ffffff',
     ballShade: '#cfcfcf',
-    shadow: 'rgba(0,0,0,0.28)',
+    shadow: 'rgba(0,0,0,0.26)',
     aim: 'rgba(255,255,255,0.98)',
+    band: 'rgba(255,255,255,0.5)',
     flag: '#e0304f',
     pole: '#ffffff',
   };
 }
+
+/** Screen-space drag distances (CSS px) — independent of how large the course is drawn. */
+const CANCEL_PX = 20;
+const GRAB_PX = 40;
 
 function create(ctx: GameContext): GameInstance {
   const { root, t } = ctx;
@@ -297,16 +310,29 @@ function create(ctx: GameContext): GameInstance {
   const particles: Particle[] = [];
   const bumperHit: number[] = [];
   let sandDots: Vec[] = [];
+  let zoneDraw: { sand: Rect[]; water: Rect[]; boost: Rect[] } = { sand: [], water: [], boost: [] };
+  let litFaces: { a: Vec; b: Vec }[] = [];
   let clock = 0;
 
   // Input state
   let dragging = false;
+  let activePointer: number | null = null;
+  let anchor: Vec = { x: 0, y: 0 };
+  let anchorOnBall = true;
   let pointer: Vec = { x: 0, y: 0 };
   let aim: Aim | null = null;
   let guide: Vec[] = [];
-  let hintShown = false;
 
-  // Sound throttling
+  // DOM handles of the round screen
+  let hud: { hole: HTMLElement; par: HTMLElement; strokes: HTMLElement; total: HTMLElement } | null = null;
+  let powerFill: HTMLElement | null = null;
+  let powerBar: HTMLElement | null = null;
+  let banner: HTMLElement | null = null;
+  let bannerTitle: HTMLElement | null = null;
+  let bannerSub: HTMLElement | null = null;
+  let hintEl: HTMLElement | null = null;
+
+  // Sound throttling: never more than one of a kind per `gapMs`.
   const lastSfx: Record<string, number> = {};
   const sfx = (name: SoundName, key: string, gapMs: number) => {
     const now = performance.now();
@@ -331,97 +357,72 @@ function create(ctx: GameContext): GameInstance {
 
   const loop = createLoop((dt) => frame(dt));
   let offPointer: (() => void) | null = null;
-  let removeCard: (() => void) | null = null;
+  let headerRemovers: (() => void)[] = [];
+  let bannerTimer = 0;
 
-  const removeRestart = ctx.addHeaderAction({
-    icon: '↻',
-    label: t('restart'),
-    onClick: () => {
-      if (phase === 'start') return;
-      if (phase === 'done' || (holeIdx === 0 && scores.length === 0 && (sim?.strokes ?? 0) === 0)) {
-        showStart();
-        return;
-      }
-      ctx.showModal({
-        title: t('restart'),
-        body: t('restartConfirm'),
-        buttons: [
-          { label: t('cancel') },
-          {
-            label: t('restart'),
-            primary: true,
-            onClick: () => {
-              ctx.storage.remove('progress');
-              showStart();
-            },
-          },
-        ],
-      });
-    },
-  });
-
-  ctx.onDestroy(() => {
-    removeRestart();
-    removeCard?.();
-    clearTimers();
-    loop.stop();
-    offPointer?.();
-    cv?.destroy();
-  });
+  ctx.onDestroy(() => teardownRound());
   ctx.onVisibility((v) => {
     if (!v) {
       loop.stop();
-      dragging = false;
-      aim = null;
-    } else if (phase === 'play' || phase === 'transition') loop.start();
+      cancelDrag();
+    } else if (cv && (phase === 'play' || phase === 'transition')) loop.start();
   });
   ctx.onThemeChange((theme) => {
     pal = makePalette(theme, ctx.cssVar);
-    if (cv && (phase === 'play' || phase === 'transition')) draw();
+    if (cv && sim) draw();
   });
 
   // ── Persistence ───────────────────────────────────────────────────────
   function loadProgress(): Progress | null {
-    const p = ctx.storage.get<Progress | null>('progress', null);
-    if (!p || !DIFFICULTIES.includes(p.diff) || !Array.isArray(p.scores)) return null;
-    if (p.hole < 0 || p.hole >= HOLE_COUNT || p.scores.length !== p.hole) return null;
-    return p;
+    const p = ctx.storage.get<unknown>('progress', null);
+    return isValidProgress(p) ? p : null;
   }
   function saveProgress(): void {
-    if (!sim || phase === 'done') return;
+    if (!sim || phase === 'done' || phase === 'start') return;
     const p: Progress = { diff, hole: holeIdx, scores: scores.slice(), strokes: sim.strokes, ball: { ...sim.lastRest } };
     ctx.storage.set('progress', p);
   }
   function holeBestKey(i: number): string {
     return `${diff}:${i}`;
   }
-  function getHoleBest(i: number): number | null {
+  function holeBests(): Record<string, number> {
     const m = ctx.storage.get<Record<string, number>>('holeBest', {});
-    const v = m[holeBestKey(i)];
+    return m && typeof m === 'object' ? m : {};
+  }
+  function getHoleBest(i: number): number | null {
+    const v = holeBests()[holeBestKey(i)];
     return typeof v === 'number' ? v : null;
   }
   function recordHoleBest(i: number, score: number): boolean {
-    const m = ctx.storage.get<Record<string, number>>('holeBest', {});
+    const m = holeBests();
     const prev = m[holeBestKey(i)];
     if (typeof prev === 'number' && prev <= score) return false;
     m[holeBestKey(i)] = score;
     ctx.storage.set('holeBest', m);
-    return true;
+    return typeof prev === 'number'; // the first time a hole is played is not a "record"
   }
 
-  // ── Start screen ──────────────────────────────────────────────────────
-  function showStart(): void {
-    phase = 'start';
+  // ── Screens ───────────────────────────────────────────────────────────
+  function teardownRound(): void {
     clearTimers();
+    clearTimeout(bannerTimer);
     loop.stop();
     offPointer?.();
     offPointer = null;
     cv?.destroy();
     cv = null;
-    removeCard?.();
-    removeCard = null;
+    headerRemovers.forEach((f) => f());
+    headerRemovers = [];
+    hud = null;
+    powerBar = powerFill = banner = bannerTitle = bannerSub = hintEl = null;
     sim = null;
     dragging = false;
+    activePointer = null;
+  }
+
+  function showStart(): void {
+    teardownRound();
+    phase = 'start';
     root.innerHTML = '';
     ctx.setStatus('');
 
@@ -438,7 +439,7 @@ function create(ctx: GameContext): GameInstance {
     if (saved) {
       buttons.append(
         button(
-          t('continueRound', { n: saved.hole + 1 }),
+          t('continueRound', { n: saved.hole + 1, d: t(saved.diff) }),
           () => {
             diff = saved.diff;
             cfg = DIFF[diff];
@@ -489,15 +490,6 @@ function create(ctx: GameContext): GameInstance {
     );
   }
 
-  // ── Game screen ───────────────────────────────────────────────────────
-  let hud: { hole: HTMLElement; par: HTMLElement; strokes: HTMLElement; total: HTMLElement };
-  let powerBar: HTMLElement;
-  let powerFill: HTMLElement;
-  let banner: HTMLElement;
-  let bannerTitle: HTMLElement;
-  let bannerSub: HTMLElement;
-  let hintEl: HTMLElement;
-
   function stat(label: string): { wrap: HTMLElement; value: HTMLElement } {
     const value = el('span', { class: 'stat-value', text: '–' });
     const wrap = el('div', { class: 'stat' }, el('span', { class: 'stat-label', text: label }), value);
@@ -505,18 +497,18 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function startRound(saved: Progress | null): void {
+    teardownRound();
     root.innerHTML = '';
-    clearTimers();
+    cfg = DIFF[diff];
     scores = saved ? saved.scores.slice() : [];
     shotsThisRound = saved ? 1 : 0;
-    hintShown = false;
 
     const sHole = stat(t('holeLabel'));
     const sPar = stat(t('parLabel'));
     const sStrokes = stat(t('strokesLabel'));
     const sTotal = stat(t('totalLabel'));
     hud = { hole: sHole.value, par: sPar.value, strokes: sStrokes.value, total: sTotal.value };
-    const hudEl = el('div', { class: 'game-hud mg-hud' }, sHole.wrap, sPar.wrap, sStrokes.wrap, sTotal.wrap);
+    const hudEl = el('div', { class: 'game-hud mg-hud', role: 'button', 'aria-label': t('scorecard') }, sHole.wrap, sPar.wrap, sStrokes.wrap, sTotal.wrap);
     hudEl.addEventListener('click', () => showScorecard(false));
     powerFill = el('div', { class: 'mg-power-fill' });
     powerBar = el('div', { class: 'mg-power' }, powerFill);
@@ -529,64 +521,114 @@ function create(ctx: GameContext): GameInstance {
     cv = createCanvas(area, (w, h) => layout(w, h));
     area.append(banner, hintEl);
     offPointer = onPointer(cv.canvas, {
-      down: (p) => onDown(p.x, p.y),
-      move: (p) => onMove(p.x, p.y),
-      up: (p) => onUp(p.x, p.y),
-      cancel: () => cancelDrag(),
+      down: (p) => onDown(p),
+      move: (p) => onMove(p),
+      up: (p) => onUp(p),
+      cancel: (p) => {
+        if (p.id === activePointer) cancelDrag();
+      },
     });
-    removeCard?.();
-    removeCard = ctx.addHeaderAction({ icon: '▤', label: t('scorecard'), onClick: () => showScorecard(false) });
+    headerRemovers.push(
+      ctx.addHeaderAction({ icon: '▤', label: t('scorecard'), onClick: () => showScorecard(false) }),
+      ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: () => askRestart() }),
+    );
 
     phase = 'play';
     loadHole(saved ? saved.hole : 0, saved ?? undefined);
     loop.start();
   }
 
+  function askRestart(): void {
+    if (phase === 'start' || phase === 'done') return;
+    const fresh = holeIdx === 0 && scores.length === 0 && (sim?.strokes ?? 0) === 0;
+    const restart = () => {
+      ctx.storage.remove('progress');
+      startRound(null);
+    };
+    if (fresh) {
+      restart();
+      return;
+    }
+    ctx.showModal({
+      title: t('restart'),
+      body: t('restartConfirm'),
+      buttons: [{ label: t('cancel') }, { label: t('restart'), primary: true, onClick: restart }],
+    });
+  }
+
   function layout(w: number, h: number): void {
-    const pad = 14;
+    const pad = 12;
     scale = Math.max(1, Math.min((w - pad * 2) / FIELD_W, (h - pad * 2) / FIELD_H));
     ox = (w - FIELD_W * scale) / 2;
     oy = (h - FIELD_H * scale) / 2;
+    if (sim) draw();
+  }
+
+  /** Extend a zone's drawn rectangle under walls / later-drawn zones so its rounded corners never show felt. */
+  function drawRect(r: Rect, h: Hole, later: Rect[]): Rect {
+    const covered = (x: number, y: number) =>
+      !pointInPoly(x, y, h.outline) || h.blocks.some((b) => pointInPoly(x, y, b)) || later.some((z) => x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h);
+    const side = (pts: [number, number][]) => pts.every(([x, y]) => covered(x, y));
+    const e = 0.08;
+    const ext = 0.4;
+    const fr = [0.15, 0.5, 0.85];
+    const out = { ...r };
+    if (side(fr.map((f) => [r.x - e, r.y + r.h * f]))) {
+      out.x -= ext;
+      out.w += ext;
+    }
+    if (side(fr.map((f) => [r.x + r.w + e, r.y + r.h * f]))) out.w += ext;
+    if (side(fr.map((f) => [r.x + r.w * f, r.y - e]))) {
+      out.y -= ext;
+      out.h += ext;
+    }
+    if (side(fr.map((f) => [r.x + r.w * f, r.y + r.h + e]))) out.h += ext;
+    return out;
   }
 
   function loadHole(i: number, saved?: Progress): void {
     holeIdx = i;
     hole = HOLES[i];
     sim = saved ? newSim(hole, saved.ball, saved.strokes) : newSim(hole);
-    if (saved && !pointInField(saved.ball)) sim = newSim(hole, hole.start, saved.strokes);
     sinkT = -1;
     fadeT = 1;
     trail.length = 0;
     particles.length = 0;
     bumperHit.length = 0;
-    dragging = false;
-    aim = null;
-    guide = [];
+    cancelDrag();
     const rnd = seededRandom(1234 + i * 97);
     sandDots = [];
     for (const s of hole.sand) {
-      const n = Math.round(s.w * s.h * 2.2);
-      for (let k = 0; k < n; k++) sandDots.push({ x: s.x + 0.1 + rnd() * (s.w - 0.2), y: s.y + 0.1 + rnd() * (s.h - 0.2) });
+      const n = Math.round(s.w * s.h * 2.4);
+      for (let k = 0; k < n; k++) sandDots.push({ x: s.x + 0.12 + rnd() * (s.w - 0.24), y: s.y + 0.12 + rnd() * (s.h - 0.24) });
     }
+    zoneDraw = {
+      sand: hole.sand.map((r) => drawRect(r, hole, [...hole.water, ...hole.boosters])),
+      water: hole.water.map((r) => drawRect(r, hole, hole.boosters)),
+      boost: hole.boosters.map((r) => drawRect(r, hole, [])),
+    };
+    litFaces = computeLitFaces(hole);
     phase = 'play';
     updateHud();
     saveProgress();
-    showBanner(`${t('holeOf', { n: i + 1 })} · ${t('name' + (i + 1))}`, t('parN', { n: hole.par }), 'mg-intro', 1300);
-    if (shotsThisRound === 0 && !hintShown) {
-      hintShown = true;
-      hintEl.classList.add('mg-show');
+    showBanner(`${t('holeOf', { n: i + 1 })} · ${t('name' + (i + 1))}`, t('parN', { n: hole.par }), 'mg-intro', 1400);
+    if (hintEl) hintEl.classList.toggle('mg-show', shotsThisRound === 0);
+    // A save made while the final allowed putt was still rolling: that hole is over.
+    if (sim.strokes >= cfg.maxStrokes) {
+      phase = 'transition';
+      after(700, () => {
+        ctx.toast(t('maxStrokesMsg'));
+        finishHole(holeScore(cfg.maxStrokes, false, cfg));
+      });
     }
   }
 
-  function pointInField(p: Vec): boolean {
-    return p.x > 0 && p.x < FIELD_W && p.y > 0 && p.y < FIELD_H;
-  }
-
   function updateHud(): void {
-    if (!sim) return;
+    if (!sim || !hud) return;
     hud.hole.textContent = `${holeIdx + 1}/${HOLE_COUNT}`;
     hud.par.textContent = String(hole.par);
     hud.strokes.textContent = String(sim.strokes);
+    hud.strokes.className = 'stat-value' + (sim.strokes >= cfg.maxStrokes - 1 ? ' mg-over' : '');
     const d = vsPar(scores);
     hud.total.textContent = formatVsPar(d);
     hud.total.className = 'stat-value' + (d < 0 ? ' mg-under' : d > 0 ? ' mg-over' : '');
@@ -595,10 +637,13 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function showBanner(title: string, sub: string, kind: '' | 'mg-good' | 'mg-bad' | 'mg-ace' | 'mg-intro', ms: number): void {
+    if (!banner || !bannerTitle || !bannerSub) return;
     bannerTitle.textContent = title;
     bannerSub.textContent = sub;
     banner.className = 'mg-banner mg-show ' + kind;
-    after(ms, () => banner.classList.remove('mg-show'));
+    clearTimeout(bannerTimer);
+    const b = banner;
+    bannerTimer = window.setTimeout(() => b.classList.remove('mg-show'), ms);
   }
 
   // ── Input ─────────────────────────────────────────────────────────────
@@ -606,51 +651,73 @@ function create(ctx: GameContext): GameInstance {
     return { x: (x - ox) / scale, y: (y - oy) / scale };
   }
 
-  function onDown(x: number, y: number): void {
+  /** Drag lengths in course units for the current zoom: full power at ~a third of the screen. */
+  function dragRange(): { min: number; max: number } {
+    const base = cv ? Math.min(cv.width, cv.height) : 360;
+    const maxPx = clamp(base * 0.34, 100, 170);
+    return { min: CANCEL_PX / scale, max: maxPx / scale };
+  }
+
+  function computeAim(): void {
+    if (!sim) return;
+    const r = dragRange();
+    aim = aimFromDrag(anchor, pointer, r.max, r.min);
+    if (powerFill) {
+      const p = aim.valid ? aim.power : 0;
+      powerFill.style.width = `${Math.round(p * 100)}%`;
+    }
+  }
+
+  function onDown(p: PointerInfo): void {
+    if (activePointer !== null) return;
     if (phase !== 'play' || !sim || sim.moving || sim.sunk) return;
-    const p = toUnits(x, y);
-    const grab = Math.max(1.7, 52 / scale);
-    if (Math.hypot(p.x - sim.ball.x, p.y - sim.ball.y) > grab) return;
+    const u = toUnits(p.x, p.y);
+    const onBall = Math.hypot(u.x - sim.ball.x, u.y - sim.ball.y) <= Math.max(BALL_R * 3, GRAB_PX / scale);
+    anchorOnBall = onBall;
+    anchor = onBall ? { x: sim.ball.x, y: sim.ball.y } : u;
+    activePointer = p.id;
     dragging = true;
-    pointer = p;
-    aim = aimFromDrag(sim.ball, p);
+    pointer = u;
     guide = [];
+    computeAim();
     ctx.haptic('light');
-    powerBar.classList.add('mg-show');
+    powerBar?.classList.add('mg-show');
   }
 
-  function onMove(x: number, y: number): void {
-    if (!dragging || !sim) return;
-    pointer = toUnits(x, y);
-    aim = aimFromDrag(sim.ball, pointer);
-    if (cfg.guide === 'bounce' && aim.valid) guide = predictPath(sim, hole, cfg, aim.dir, aim.power, 1.5, 0.3);
-    else guide = [];
-    powerFill.style.width = `${Math.round((aim.valid ? aim.power : 0) * 100)}%`;
+  function onMove(p: PointerInfo): void {
+    if (!dragging || !sim || p.id !== activePointer) return;
+    pointer = toUnits(p.x, p.y);
+    const wasValid = aim?.valid ?? false;
+    computeAim();
+    if (aim && aim.valid !== wasValid) ctx.haptic('light');
   }
 
-  function onUp(x: number, y: number): void {
-    if (!dragging || !sim) return;
-    pointer = toUnits(x, y);
-    aim = aimFromDrag(sim.ball, pointer);
+  function onUp(p: PointerInfo): void {
+    if (!dragging || !sim || p.id !== activePointer) return;
+    pointer = toUnits(p.x, p.y);
+    computeAim();
     const a = aim;
     cancelDrag();
-    if (!a.valid || phase !== 'play') return;
+    if (!a || !a.valid || phase !== 'play') return;
     if (shoot(sim, a.dir, a.power)) {
       shotsThisRound++;
-      hintEl.classList.remove('mg-show');
+      hintEl?.classList.remove('mg-show');
       ctx.play('shoot');
       ctx.haptic('medium');
       trail.length = 0;
       updateHud();
+      // Save straight away (ball at the spot it was hit from) so quitting mid-roll cannot undo a stroke.
+      saveProgress();
     }
   }
 
   function cancelDrag(): void {
     dragging = false;
+    activePointer = null;
     aim = null;
     guide = [];
-    powerBar.classList.remove('mg-show');
-    powerFill.style.width = '0%';
+    powerBar?.classList.remove('mg-show');
+    if (powerFill) powerFill.style.width = '0%';
   }
 
   // ── Simulation + effects ──────────────────────────────────────────────
@@ -664,12 +731,13 @@ function create(ctx: GameContext): GameInstance {
         trail.push({ x: sim.ball.x, y: sim.ball.y });
         if (trail.length > 14) trail.shift();
       } else if (trail.length) trail.shift();
+      let ended = false;
       for (const ev of events) {
         switch (ev.type) {
           case 'wall':
             if (ev.speed > 1.2) {
               sfx('tap', 'wall', 70);
-              if (ev.speed > 5) ctx.haptic('light');
+              if (ev.speed > 6) ctx.haptic('light');
               burst(ev.x, ev.y, 4, pal.ball, 1.5);
             }
             break;
@@ -693,26 +761,31 @@ function create(ctx: GameContext): GameInstance {
             ctx.play('error');
             ctx.haptic('heavy');
             ctx.toast(t('waterMsg'));
-            burst(ev.x, ev.y, 12, pal.waterLine, 3);
-            updateHud();
-            saveProgress();
+            splash(ev.x, ev.y);
+            trail.length = 0;
             break;
           case 'rescue':
-            ctx.toast(t('rescued'));
+            if (performance.now() - (lastSfx.rescueToast ?? -1e9) > 2500) {
+              lastSfx.rescueToast = performance.now();
+              ctx.toast(t('rescued'));
+            }
+            trail.length = 0;
             break;
           case 'sunk':
             onSunk();
+            ended = true;
             break;
           case 'stop':
-            if (wasMoving) onStopped();
             break;
         }
       }
+      // Any way the ball came to rest (normal stop, water reset, rescue) ends the stroke.
+      if (!ended && wasMoving && sim && !sim.moving && !sim.sunk && phase === 'play') onStopped();
+      if (dragging && cfg.guide === 'bounce' && aim?.valid && sim) guide = predictPath(sim, hole, cfg, aim.dir, aim.power, 1.5, 0.3);
     } else if (sim && phase === 'transition') {
       sim.time += dt;
       if (sinkT >= 0) sinkT += dt;
     }
-    // Particles
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.life -= dt;
@@ -728,24 +801,28 @@ function create(ctx: GameContext): GameInstance {
     draw();
   }
 
-  function burst(x: number, y: number, n: number, color: string, speed: number): void {
-    if (particles.length > 80) return;
+  function burst(x: number, y: number, n: number, color: string | string[], speed: number, life = 0.35): void {
+    if (particles.length > 120) return;
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
       const s = speed * (0.4 + Math.random() * 0.8);
-      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.35, max: 0.35, r: 0.04 + Math.random() * 0.05, color });
+      const c = Array.isArray(color) ? color[i % color.length] : color;
+      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life, max: life, r: 0.04 + Math.random() * 0.06, color: c });
     }
+  }
+
+  function splash(x: number, y: number): void {
+    burst(x, y, 14, [pal.waterLine, pal.water], 3, 0.5);
   }
 
   function onStopped(): void {
     if (!sim) return;
     updateHud();
     if (sim.strokes >= cfg.maxStrokes) {
-      const score = holeScore(sim.strokes, false, cfg);
       ctx.play('lose');
       ctx.haptic('error');
       ctx.toast(t('maxStrokesMsg'));
-      finishHole(score);
+      finishHole(holeScore(sim.strokes, false, cfg));
       return;
     }
     saveProgress();
@@ -759,15 +836,17 @@ function create(ctx: GameContext): GameInstance {
     cancelDrag();
     ctx.play('coin');
     ctx.haptic('success');
-    burst(hole.cup.x, hole.cup.y, 14, pal.warning, 3);
     const score = holeScore(sim.strokes, true, cfg);
+    burst(hole.cup.x, hole.cup.y, 12, pal.warning, 3);
+    if (score < hole.par) burst(hole.cup.x, hole.cup.y, 26, [pal.warning, pal.success, pal.accent, pal.flag, '#ffffff'], 5, 0.9);
     updateHud();
-    after(380, () => finishHole(score));
+    after(420, () => finishHole(score));
   }
 
   function finishHole(score: number): void {
     if (!sim) return;
     phase = 'transition';
+    cancelDrag();
     scores[holeIdx] = score;
     const term = scoreTerm(score, hole.par);
     const diffN = score - hole.par;
@@ -776,31 +855,40 @@ function create(ctx: GameContext): GameInstance {
     let sub = `${t('strokesN', { n: score })} · ${t('parN', { n: hole.par })} · ${formatVsPar(diffN)}`;
     if (isBest) sub += ` · ${t('holeBestNote')}`;
     const kind = term === 'holeInOne' ? 'mg-ace' : diffN < 0 ? 'mg-good' : diffN > 1 ? 'mg-bad' : '';
-    if (diffN < 0) ctx.play('success');
-    showBanner(title, sub, kind, 1700);
+    if (term === 'holeInOne') {
+      ctx.play('win');
+      ctx.haptic('success');
+    } else if (diffN < 0) ctx.play('success');
+    showBanner(title, sub, kind, 1750);
     updateHud();
-    if (holeIdx + 1 >= HOLE_COUNT) {
+    const last = holeIdx + 1 >= HOLE_COUNT;
+    if (last) {
+      // Commit the result now, so leaving during the banner cannot lose the round.
       ctx.storage.remove('progress');
-      after(1750, () => finishRound());
+      const isBestRound = ctx.storage.recordBest(diff, sumScores(scores), 'lower');
+      after(1850, () => finishRound(isBestRound));
     } else {
-      ctx.storage.set('progress', { diff, hole: holeIdx + 1, scores: scores.slice(), strokes: 0, ball: HOLES[holeIdx + 1].start } satisfies Progress);
-      after(1750, () => loadHole(holeIdx + 1));
+      const next = HOLES[holeIdx + 1];
+      ctx.storage.set('progress', { diff, hole: holeIdx + 1, scores: scores.slice(), strokes: 0, ball: { ...next.start } } satisfies Progress);
+      after(1850, () => loadHole(holeIdx + 1));
     }
   }
 
-  function finishRound(): void {
+  function finishRound(isBest: boolean): void {
     phase = 'done';
-    loop.stop();
-    const total = sumScores(scores);
-    const isBest = ctx.storage.recordBest(diff, total, 'lower');
     ctx.play('win');
     ctx.haptic('success');
     showScorecard(true, isBest);
+    // Keep the last frame on screen but stop burning frames behind the modal.
+    after(400, () => {
+      if (phase === 'done') loop.stop();
+    });
   }
 
   // ── Scorecard ─────────────────────────────────────────────────────────
   function scorecardEl(final: boolean, isBest: boolean): HTMLElement {
     const grid = el('div', { class: 'mg-card-grid' });
+    const bests = holeBests();
     HOLES.forEach((h, i) => {
       const s = scores[i];
       let cls = 'mg-cell';
@@ -809,33 +897,35 @@ function create(ctx: GameContext): GameInstance {
       else if (s > cfg.maxStrokes) cls += ' mg-max';
       else if (s < h.par) cls += ' mg-under';
       else if (s > h.par) cls += ' mg-over';
+      const hb = bests[holeBestKey(i)];
       grid.append(
         el(
           'div',
           { class: cls },
           el('span', { class: 'mg-cell-h', text: String(i + 1) }),
           el('span', { class: 'mg-cell-s', text: s === undefined ? '–' : String(s) }),
-          el('span', { class: 'mg-cell-p', text: `P${h.par}` }),
+          el('span', { class: 'mg-cell-p', text: `P${h.par}` + (typeof hb === 'number' ? ` · ★${hb}` : '') }),
         ),
       );
     });
+    const played = scores.filter((s) => s !== undefined).length;
     const total = sumScores(scores);
     const d = vsPar(scores);
-    const played = scores.filter((s) => s !== undefined).length;
-    const parSoFar = final ? totalPar() : HOLES.slice(0, played).reduce((a, h) => a + h.par, 0);
+    const parSoFar = HOLES.slice(0, played).reduce((a, h) => a + h.par, 0);
     const best = ctx.storage.getBest(diff);
-    const row = (label: string, value: string, cls = '') => el('div', { class: 'mg-card-row' }, el('span', { class: 'muted', text: label }), el('strong', { class: cls, text: value }));
-    const wrap = el(
+    const row = (label: string, value: string, cls = '') =>
+      el('div', { class: 'mg-card-row' }, el('span', { class: 'muted', text: label }), el('strong', { class: cls, text: value }));
+    return el(
       'div',
       { class: 'mg-card' },
       grid,
+      el('p', { class: 'mg-card-legend muted', text: `★ = ${t('cellBest')}` }),
       row(t('totalStrokes'), String(total)),
       row(t('courseParLabel'), String(parSoFar)),
       row(t('vsParLabel'), formatVsPar(d), d < 0 ? 'mg-under' : d > 0 ? 'mg-over' : ''),
-      best !== null ? row(t('bestRound'), t('bestTotal', { n: best, d: formatVsPar(best - totalPar()) })) : null,
+      best !== null ? row(t('bestRound'), t('bestValue', { n: best, d: formatVsPar(best - totalPar()) })) : null,
       isBest ? el('p', { class: 'mg-newbest', text: '🏆 ' + t('newBest') }) : null,
     );
-    return wrap;
   }
 
   function showScorecard(final: boolean, isBest = false): void {
@@ -851,6 +941,7 @@ function create(ctx: GameContext): GameInstance {
         ],
       });
     } else {
+      cancelDrag();
       ctx.showModal({ title: `${t('scorecard')} · ${t(diff)}`, body: scorecardEl(false, false), buttons: [{ label: t('close'), primary: true }] });
     }
   }
@@ -861,6 +952,72 @@ function create(ctx: GameContext): GameInstance {
     g.moveTo(p[0].x, p[0].y);
     for (let i = 1; i < p.length; i++) g.lineTo(p[i].x, p[i].y);
     g.closePath();
+  }
+
+  /** Wooden rails: dark rim, solid body, and a lit inner edge (clipped to the playable area). */
+  function strokeWalls(g: CanvasRenderingContext2D): void {
+    const polys = [hole.outline, ...hole.blocks];
+    const pass = (color: string, w: number) => {
+      g.strokeStyle = color;
+      g.lineWidth = w;
+      for (const p of polys) {
+        tracePoly(g, p);
+        g.stroke();
+      }
+    };
+    pass(pal.wallEdge, 0.36);
+    g.fillStyle = pal.wall;
+    for (const b of hole.blocks) {
+      tracePoly(g, b);
+      g.fill();
+    }
+    pass(pal.wall, 0.24);
+    // Light from the top-left: highlight only the rail faces that look towards it.
+    g.strokeStyle = pal.wallTop;
+    g.lineWidth = 0.07;
+    g.lineCap = 'butt';
+    g.beginPath();
+    for (const f of litFaces) {
+      g.moveTo(f.a.x, f.a.y);
+      g.lineTo(f.b.x, f.b.y);
+    }
+    g.stroke();
+    g.lineCap = 'round';
+  }
+
+  /** Wall edges facing the light, shifted onto the face side of the rail (computed once per hole). */
+  function computeLitFaces(h: Hole): { a: Vec; b: Vec }[] {
+    const out: { a: Vec; b: Vec }[] = [];
+    const lx = -0.45;
+    const ly = -0.9;
+    const polys: { p: Vec[]; faceInside: boolean }[] = [{ p: h.outline, faceInside: true }, ...h.blocks.map((p) => ({ p, faceInside: false }))];
+    for (const { p, faceInside } of polys) {
+      for (let i = 0; i < p.length; i++) {
+        const a = p[i];
+        const b = p[(i + 1) % p.length];
+        const len = Math.hypot(b.x - a.x, b.y - a.y);
+        if (len < 1e-6) continue;
+        let nx = (b.y - a.y) / len;
+        let ny = -(b.x - a.x) / len;
+        const inside = pointInPoly((a.x + b.x) / 2 + nx * 0.05, (a.y + b.y) / 2 + ny * 0.05, p);
+        // Face normal points towards the playing surface.
+        if (inside !== faceInside) {
+          nx = -nx;
+          ny = -ny;
+        }
+        if (nx * lx + ny * ly < 0.3) continue;
+        // Skip faces that do not border open play (e.g. a block edge lying on the outer rail).
+        const mx = (a.x + b.x) / 2 + nx * 0.25;
+        const my = (a.y + b.y) / 2 + ny * 0.25;
+        if (!pointInPoly(mx, my, h.outline) || h.blocks.some((q) => q !== p && pointInPoly(mx, my, q))) continue;
+        const o = 0.09;
+        const inset = Math.min(0.2, len * 0.3);
+        const tx = ((b.x - a.x) / len) * inset;
+        const ty = ((b.y - a.y) / len) * inset;
+        out.push({ a: { x: a.x + nx * o + tx, y: a.y + ny * o + ty }, b: { x: b.x + nx * o - tx, y: b.y + ny * o - ty } });
+      }
+    }
+    return out;
   }
 
   function draw(): void {
@@ -898,24 +1055,35 @@ function create(ctx: GameContext): GameInstance {
     g.lineWidth = 1.1;
     g.stroke();
 
+    // Tee mat with its tee spot.
+    g.fillStyle = pal.tee;
+    g.beginPath();
+    g.roundRect(hole.start.x - 0.55, hole.start.y - 0.38, 1.1, 0.76, 0.16);
+    g.fill();
+    g.fillStyle = pal.stripe;
+    g.beginPath();
+    g.arc(hole.start.x, hole.start.y, 0.09, 0, Math.PI * 2);
+    g.fill();
+
     // Sand
-    for (const s of hole.sand) {
-      g.fillStyle = pal.sand;
+    g.fillStyle = pal.sand;
+    for (const s of zoneDraw.sand) {
       g.beginPath();
-      g.roundRect(s.x, s.y, s.w, s.h, 0.25);
+      g.roundRect(s.x, s.y, s.w, s.h, 0.3);
       g.fill();
     }
     g.fillStyle = pal.sandDot;
+    g.beginPath();
     for (const d of sandDots) {
-      g.beginPath();
+      g.moveTo(d.x + 0.035, d.y);
       g.arc(d.x, d.y, 0.035, 0, Math.PI * 2);
-      g.fill();
     }
+    g.fill();
     // Water
-    for (const w of hole.water) {
+    for (const w of zoneDraw.water) {
       g.save();
       g.beginPath();
-      g.roundRect(w.x, w.y, w.w, w.h, 0.2);
+      g.roundRect(w.x, w.y, w.w, w.h, 0.25);
       g.clip();
       g.fillStyle = pal.water;
       g.fillRect(w.x, w.y, w.w, w.h);
@@ -934,75 +1102,56 @@ function create(ctx: GameContext): GameInstance {
       }
       g.restore();
     }
-    // Boosters
-    for (const b of hole.boosters) {
+    // Boosters (animated chevrons along the push direction).
+    hole.boosters.forEach((b, i) => {
+      const d = zoneDraw.boost[i] ?? b;
       g.save();
       g.beginPath();
-      g.roundRect(b.x, b.y, b.w, b.h, 0.2);
+      g.roundRect(d.x, d.y, d.w, d.h, 0.22);
       g.clip();
       g.fillStyle = pal.boost;
-      g.fillRect(b.x, b.y, b.w, b.h);
+      g.fillRect(d.x, d.y, d.w, d.h);
       const cx = b.x + b.w / 2;
       const cy = b.y + b.h / 2;
-      const ang = Math.atan2(b.dir.y, b.dir.x) + Math.PI / 2; // dir → local "up"
       g.translate(cx, cy);
-      g.rotate(ang);
-      const len = Math.abs(b.dir.x) > 0.5 ? b.w : b.h;
-      const wid = Math.abs(b.dir.x) > 0.5 ? b.h : b.w;
+      g.rotate(Math.atan2(b.dir.y, b.dir.x) + Math.PI / 2); // push direction → local "up"
+      const horizontal = Math.abs(b.dir.x) > 0.5;
+      const len = horizontal ? b.w : b.h;
+      const wid = horizontal ? b.h : b.w;
       const spacing = 0.8;
-      const off = (clock * 2.4) % spacing;
+      const speed = 2.4 * (b.power ?? 1);
+      const off = (clock * speed) % spacing;
       g.strokeStyle = pal.boostChev;
       g.lineWidth = 0.12;
       g.globalAlpha = 0.9;
-      for (let yy = len / 2 - off; yy > -len / 2 - spacing; yy -= spacing) {
+      const half = Math.min(wid * 0.3, 0.9);
+      for (let yy = len / 2 + spacing - off; yy > -len / 2 - spacing; yy -= spacing) {
         g.beginPath();
-        g.moveTo(-wid * 0.3, yy + 0.22);
+        g.moveTo(-half, yy + 0.24);
         g.lineTo(0, yy - 0.08);
-        g.lineTo(wid * 0.3, yy + 0.22);
+        g.lineTo(half, yy + 0.24);
         g.stroke();
       }
       g.restore();
-    }
-    // Blocks fill (inside clip so nothing leaks outside the course)
-    for (const b of hole.blocks) {
-      g.fillStyle = pal.wall;
-      tracePoly(g, b);
-      g.fill();
-    }
+    });
     g.restore();
 
-    // Walls as thick lines.
-    g.strokeStyle = pal.wall;
-    g.lineWidth = 0.3;
-    tracePoly(g, hole.outline);
-    g.stroke();
-    for (const b of hole.blocks) {
-      tracePoly(g, b);
-      g.stroke();
-    }
-    g.strokeStyle = pal.wallEdge;
-    g.lineWidth = 0.08;
-    tracePoly(g, hole.outline);
-    g.stroke();
-    for (const b of hole.blocks) {
-      tracePoly(g, b);
-      g.stroke();
-    }
+    strokeWalls(g);
 
     // Movers
     for (const m of hole.movers) {
       const r = moverRect(m, sim.time);
-      g.save();
       g.fillStyle = pal.shadow;
       g.fillRect(r.x + 0.08, r.y + 0.1, r.w, r.h);
+      g.save();
       g.fillStyle = pal.wall;
       g.fillRect(r.x, r.y, r.w, r.h);
       g.beginPath();
       g.rect(r.x, r.y, r.w, r.h);
       g.clip();
-      g.strokeStyle = pal.wallEdge;
-      g.globalAlpha = 0.45;
-      g.lineWidth = 0.12;
+      g.strokeStyle = pal.warning;
+      g.globalAlpha = 0.55;
+      g.lineWidth = 0.13;
       for (let x = r.x - r.h; x < r.x + r.w + r.h; x += 0.45) {
         g.beginPath();
         g.moveTo(x, r.y + r.h);
@@ -1021,17 +1170,19 @@ function create(ctx: GameContext): GameInstance {
       g.beginPath();
       g.arc(b.x + 0.06, b.y + 0.08, b.r, 0, Math.PI * 2);
       g.fill();
-      const grad = g.createRadialGradient(b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.1, b.x, b.y, b.r);
+      const age = clock - (bumperHit[i] ?? -10);
+      const pulse = age < 0.15 ? 1 + 0.12 * (1 - age / 0.15) : 1;
+      const rr = b.r * pulse;
+      const grad = g.createRadialGradient(b.x - rr * 0.3, b.y - rr * 0.3, rr * 0.1, b.x, b.y, rr);
       grad.addColorStop(0, pal.bumperCore);
       grad.addColorStop(1, pal.bumper);
       g.fillStyle = grad;
       g.beginPath();
-      g.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      g.arc(b.x, b.y, rr, 0, Math.PI * 2);
       g.fill();
       g.strokeStyle = pal.bumperRing;
       g.lineWidth = 0.09;
       g.stroke();
-      const age = clock - (bumperHit[i] ?? -10);
       if (age < 0.35) {
         g.globalAlpha = 1 - age / 0.35;
         g.lineWidth = 0.1;
@@ -1043,30 +1194,43 @@ function create(ctx: GameContext): GameInstance {
     });
 
     // Cup
-    g.fillStyle = pal.shadow;
-    g.beginPath();
-    g.ellipse(hole.cup.x + 0.04, hole.cup.y + 0.06, CUP_R + 0.06, CUP_R + 0.02, 0, 0, Math.PI * 2);
-    g.fill();
+    const cx = hole.cup.x;
+    const cy = hole.cup.y;
     g.fillStyle = pal.cupRim;
     g.beginPath();
-    g.arc(hole.cup.x, hole.cup.y, CUP_R + 0.05, 0, Math.PI * 2);
+    g.arc(cx, cy, CUP_R + 0.06, 0, Math.PI * 2);
     g.fill();
-    g.fillStyle = pal.cup;
+    const cg = g.createRadialGradient(cx + 0.06, cy + 0.08, CUP_R * 0.1, cx, cy, CUP_R);
+    cg.addColorStop(0, pal.cup);
+    cg.addColorStop(1, pal.cupRim);
+    g.fillStyle = cg;
     g.beginPath();
-    g.arc(hole.cup.x, hole.cup.y, CUP_R, 0, Math.PI * 2);
+    g.arc(cx, cy, CUP_R, 0, Math.PI * 2);
     g.fill();
 
     // Trail
     const n = trail.length;
+    g.fillStyle = pal.ball;
     for (let i = 0; i < n; i++) {
       const k = (i + 1) / (n + 1);
       g.globalAlpha = 0.22 * k;
-      g.fillStyle = pal.ball;
       g.beginPath();
       g.arc(trail[i].x, trail[i].y, BALL_R * (0.3 + 0.6 * k), 0, Math.PI * 2);
       g.fill();
     }
     g.globalAlpha = 1;
+
+    // Ready indicator: a soft pulsing ring when a putt is possible.
+    const ready = phase === 'play' && !sim.moving && !sim.sunk && !dragging;
+    if (ready) {
+      g.strokeStyle = pal.aim;
+      g.globalAlpha = 0.35 + 0.2 * Math.sin(clock * 4);
+      g.lineWidth = 0.05;
+      g.beginPath();
+      g.arc(sim.ball.x, sim.ball.y, BALL_R + 0.2 + 0.05 * Math.sin(clock * 4), 0, Math.PI * 2);
+      g.stroke();
+      g.globalAlpha = 1;
+    }
 
     // Ball
     if (!(sim.sunk && sinkT > 0.4)) {
@@ -1075,8 +1239,8 @@ function create(ctx: GameContext): GameInstance {
       let s = 1;
       if (sim.sunk && sinkT >= 0) {
         const k = Math.min(1, sinkT / 0.4);
-        bx = sim.ball.x + (hole.cup.x - sim.ball.x) * k;
-        by = sim.ball.y + (hole.cup.y - sim.ball.y) * k;
+        bx = sim.ball.x + (cx - sim.ball.x) * k;
+        by = sim.ball.y + (cy - sim.ball.y) * k;
         s = 1 - k * 0.85;
       }
       if (!sim.sunk) {
@@ -1096,17 +1260,17 @@ function create(ctx: GameContext): GameInstance {
 
     // Flag (drawn above the ball so it reads as standing up).
     const wave = Math.sin(clock * 3) * 0.06;
-    g.strokeStyle = pal.pole;
     g.lineWidth = 0.07;
+    g.strokeStyle = pal.pole;
     g.beginPath();
-    g.moveTo(hole.cup.x, hole.cup.y);
-    g.lineTo(hole.cup.x, hole.cup.y - 1.45);
+    g.moveTo(cx, cy);
+    g.lineTo(cx, cy - 1.45);
     g.stroke();
     g.fillStyle = pal.flag;
     g.beginPath();
-    g.moveTo(hole.cup.x, hole.cup.y - 1.45);
-    g.lineTo(hole.cup.x + 0.78 + wave, hole.cup.y - 1.2 + wave * 0.5);
-    g.lineTo(hole.cup.x, hole.cup.y - 0.95);
+    g.moveTo(cx, cy - 1.45);
+    g.lineTo(cx + 0.78 + wave, cy - 1.2 + wave * 0.5);
+    g.lineTo(cx, cy - 0.95);
     g.closePath();
     g.fill();
 
@@ -1120,7 +1284,6 @@ function create(ctx: GameContext): GameInstance {
     }
     g.globalAlpha = 1;
 
-    // Aim overlay
     if (dragging && aim) drawAim(g, aim);
 
     g.restore();
@@ -1137,86 +1300,99 @@ function create(ctx: GameContext): GameInstance {
   function drawAim(g: CanvasRenderingContext2D, a: Aim): void {
     if (!sim) return;
     const b = sim.ball;
-    // Rubber band to the finger.
-    g.strokeStyle = 'rgba(255,255,255,0.3)';
+    const range = dragRange();
+    // Rubber band from the anchor to the finger.
+    g.strokeStyle = pal.band;
     g.lineWidth = 0.06;
     g.beginPath();
-    g.moveTo(b.x, b.y);
+    g.moveTo(anchor.x, anchor.y);
     g.lineTo(pointer.x, pointer.y);
     g.stroke();
-    g.fillStyle = 'rgba(255,255,255,0.25)';
+    g.fillStyle = pal.band;
     g.beginPath();
-    g.arc(pointer.x, pointer.y, 0.28, 0, Math.PI * 2);
+    g.arc(pointer.x, pointer.y, 0.26, 0, Math.PI * 2);
     g.fill();
+    if (!anchorOnBall) {
+      // Where the drag started (also the cancel zone).
+      g.lineWidth = 0.05;
+      g.setLineDash([0.1, 0.12]);
+      g.beginPath();
+      g.arc(anchor.x, anchor.y, range.min, 0, Math.PI * 2);
+      g.stroke();
+      g.setLineDash([]);
+    }
 
-    if (a.valid) {
-      g.strokeStyle = pal.aim;
-      g.lineWidth = 0.09;
-      if (cfg.guide === 'bounce' && guide.length > 1) {
-        g.setLineDash([0.12, 0.2]);
-        g.beginPath();
-        g.moveTo(guide[0].x, guide[0].y);
-        for (let i = 1; i < guide.length; i++) g.lineTo(guide[i].x, guide[i].y);
-        g.stroke();
-        g.setLineDash([]);
-      } else if (cfg.guide === 'line' || cfg.guide === 'bounce') {
-        const len = 1 + 5 * a.power;
-        g.save();
-        tracePoly(g, hole.outline);
-        g.clip();
-        g.setLineDash([0.12, 0.2]);
-        g.beginPath();
-        g.moveTo(b.x, b.y);
-        g.lineTo(b.x + a.dir.x * len, b.y + a.dir.y * len);
-        g.stroke();
-        g.setLineDash([]);
-        g.restore();
-      } else {
-        const len = 1.1;
-        const tx = b.x + a.dir.x * len;
-        const ty = b.y + a.dir.y * len;
-        g.beginPath();
-        g.moveTo(b.x + a.dir.x * BALL_R * 1.4, b.y + a.dir.y * BALL_R * 1.4);
-        g.lineTo(tx, ty);
-        g.stroke();
-        const px = -a.dir.y;
-        const py = a.dir.x;
-        g.fillStyle = pal.aim;
-        g.beginPath();
-        g.moveTo(tx + a.dir.x * 0.22, ty + a.dir.y * 0.22);
-        g.lineTo(tx + px * 0.16, ty + py * 0.16);
-        g.lineTo(tx - px * 0.16, ty - py * 0.16);
-        g.closePath();
-        g.fill();
-      }
-      // Power ring around the ball.
-      const rr = 0.58;
-      g.lineWidth = 0.13;
-      g.strokeStyle = 'rgba(0,0,0,0.3)';
-      g.beginPath();
-      g.arc(b.x, b.y, rr, 0, Math.PI * 2);
-      g.stroke();
-      g.strokeStyle = a.power < 0.5 ? pal.success : a.power < 0.8 ? pal.warning : pal.danger;
-      g.beginPath();
-      g.arc(b.x, b.y, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * a.power);
-      g.stroke();
-    } else {
-      // Inside the cancel zone: show a faint "x" ring.
-      g.strokeStyle = 'rgba(255,255,255,0.35)';
+    if (!a.valid) {
+      // Inside the cancel zone.
+      g.strokeStyle = pal.band;
       g.lineWidth = 0.08;
       g.beginPath();
       g.arc(b.x, b.y, 0.58, 0, Math.PI * 2);
       g.stroke();
+      return;
     }
+
+    g.strokeStyle = pal.aim;
+    g.lineWidth = 0.09;
+    if (cfg.guide === 'bounce' && guide.length > 1) {
+      g.setLineDash([0.12, 0.2]);
+      g.beginPath();
+      g.moveTo(guide[0].x, guide[0].y);
+      for (let i = 1; i < guide.length; i++) g.lineTo(guide[i].x, guide[i].y);
+      g.stroke();
+      g.setLineDash([]);
+      const end = guide[guide.length - 1];
+      g.fillStyle = pal.aim;
+      g.beginPath();
+      g.arc(end.x, end.y, 0.09, 0, Math.PI * 2);
+      g.fill();
+    } else if (cfg.guide !== 'short') {
+      const len = 1 + 5 * a.power;
+      g.save();
+      tracePoly(g, hole.outline);
+      g.clip();
+      g.setLineDash([0.12, 0.2]);
+      g.beginPath();
+      g.moveTo(b.x, b.y);
+      g.lineTo(b.x + a.dir.x * len, b.y + a.dir.y * len);
+      g.stroke();
+      g.setLineDash([]);
+      g.restore();
+    } else {
+      const len = 1.1;
+      const tx = b.x + a.dir.x * len;
+      const ty = b.y + a.dir.y * len;
+      g.beginPath();
+      g.moveTo(b.x + a.dir.x * BALL_R * 1.4, b.y + a.dir.y * BALL_R * 1.4);
+      g.lineTo(tx, ty);
+      g.stroke();
+      const px = -a.dir.y;
+      const py = a.dir.x;
+      g.fillStyle = pal.aim;
+      g.beginPath();
+      g.moveTo(tx + a.dir.x * 0.22, ty + a.dir.y * 0.22);
+      g.lineTo(tx + px * 0.16, ty + py * 0.16);
+      g.lineTo(tx - px * 0.16, ty - py * 0.16);
+      g.closePath();
+      g.fill();
+    }
+    // Power ring around the ball.
+    const rr = 0.58;
+    g.lineWidth = 0.13;
+    g.strokeStyle = 'rgba(0,0,0,0.3)';
+    g.beginPath();
+    g.arc(b.x, b.y, rr, 0, Math.PI * 2);
+    g.stroke();
+    g.strokeStyle = a.power < 0.5 ? pal.success : a.power < 0.8 ? pal.warning : pal.danger;
+    g.beginPath();
+    g.arc(b.x, b.y, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * a.power);
+    g.stroke();
   }
 
   showStart();
   return {
     destroy() {
-      clearTimers();
-      loop.stop();
-      offPointer?.();
-      cv?.destroy();
+      teardownRound();
     },
   };
 }

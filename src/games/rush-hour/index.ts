@@ -1,4 +1,4 @@
-import type { GameContext, GameInstance, GameModule } from '../../app/types';
+import type { GameContext, GameInstance, GameModule, ThemeName } from '../../app/types';
 import { el, button, segmented } from '../../app/ui';
 import { createCanvas, createLoop, onPointer, roundRect, clamp, type CanvasHandle } from '../../app/canvas';
 import {
@@ -7,12 +7,14 @@ import {
   GOAL_POS,
   RED,
   SIZE,
+  DistanceExplorer,
   applyMove,
-  bankSize,
-  exploreDistances,
-  getPuzzle,
+  bankPuzzle,
+  encodeState,
+  finishRemix,
   isSolved,
   nextMove,
+  remixPlan,
   slideRange,
   stars as starsFor,
   vehicleAt,
@@ -26,14 +28,13 @@ import './style.css';
 const strings = {
   zh: {
     rules:
-      '6×6 的停车场里，红色小车必须从右侧出口驶出。\n每辆车只能沿自己的方向（横向或纵向）滑动，不能转弯、不能穿过其他车。\n按住一辆车拖动即可移动；松手后自动停到最近的格子。\n一次滑动（不论距离）算 1 步。步数越接近「最优」越好：等于最优 ⭐⭐⭐，超出 3 步以内 ⭐⭐，其余 ⭐。\n想不出来可以撤销、重置或用「提示」查看最优的下一步。\n难度按最优步数划分：简单 5–10 · 中等 11–18 · 困难 19–30 · 专家 31+。\n通关后解锁下一关，每个难度的进度分别保存。',
+      '6×6 的停车场里，红色小车必须从右侧出口驶出。\n每辆车只能沿自己的方向（横向或纵向）滑动，不能转弯、不能穿过其他车。\n按住一辆车拖动即可移动；松手后自动停到最近的格子。\n一次滑动（不论距离）算 1 步。步数越接近「最优」越好：等于最优 ⭐⭐⭐，超出 3 步以内 ⭐⭐，其余 ⭐。\n想不出来可以撤销、重置或用「提示」查看最优的下一步；用过提示的通关最多 ⭐⭐。\n难度按最优步数划分：简单 5–10 · 中等 11–18 · 困难 19–30 · 专家 31+。\n通关后解锁下一关，每个难度的进度分别保存。',
     desc: '滑动车辆，让红车驶出停车场',
     easyDesc: '最优 5–10 步 · 8–10 辆车',
     mediumDesc: '最优 11–18 步 · 8–11 辆车',
     hardDesc: '最优 19–30 步 · 9–13 辆车',
     expertDesc: '最优 31 步以上 · 10–13 辆车',
     levelN: '第 {n} 关',
-    par: '最优',
     movesPar: '步数 / 最优',
     bestLabel: '最佳',
     levelBest: '最佳 {n} 步',
@@ -46,8 +47,10 @@ const strings = {
     starPerfect: '完美！这就是最优解。',
     starGood: '不错，离最优只差一点。',
     starOk: '通关了！再试试更少的步数。',
-    hintsUsed: '用了 {n} 次提示',
+    starHinted: '步数是最优的！不用提示再通关一次就能拿 ⭐⭐⭐。',
+    hintsUsed: '用了 {n} 次提示 · 用提示最多 ⭐⭐',
     hintToast: '沿箭头滑动高亮的车',
+    hintWait: '正在计算提示…',
     hintNone: '暂时没有提示',
     undoNothing: '没有可撤销的步骤',
     generating: '正在生成关卡…',
@@ -57,14 +60,13 @@ const strings = {
   },
   en: {
     rules:
-      'The red car is stuck in a 6×6 parking lot and must leave through the exit on the right.\nEvery vehicle slides only along its own axis (horizontal or vertical); no turning, no passing through others.\nPress a vehicle and drag it; it snaps to the nearest cell when you let go.\nOne slide of any distance = 1 move. Match the par for ⭐⭐⭐, finish within par + 3 for ⭐⭐, otherwise ⭐.\nStuck? Undo, reset, or use Hint to see the optimal next move.\nDifficulty is the optimal move count: easy 5–10 · medium 11–18 · hard 19–30 · expert 31+.\nClearing a level unlocks the next; progress is saved per difficulty.',
+      'The red car is stuck in a 6×6 parking lot and must leave through the exit on the right.\nEvery vehicle slides only along its own axis (horizontal or vertical); no turning, no passing through others.\nPress a vehicle and drag it; it snaps to the nearest cell when you let go.\nOne slide of any distance = 1 move. Match the par for ⭐⭐⭐, finish within par + 3 for ⭐⭐, otherwise ⭐.\nStuck? Undo, reset, or use Hint to see the optimal next move; a solve that used hints earns at most ⭐⭐.\nDifficulty is the optimal move count: easy 5–10 · medium 11–18 · hard 19–30 · expert 31+.\nClearing a level unlocks the next; progress is saved per difficulty.',
     desc: 'Slide the cars and free the red one',
     easyDesc: 'Par 5–10 · 8–10 vehicles',
     mediumDesc: 'Par 11–18 · 8–11 vehicles',
     hardDesc: 'Par 19–30 · 9–13 vehicles',
     expertDesc: 'Par 31+ · 10–13 vehicles',
     levelN: 'Level {n}',
-    par: 'Par',
     movesPar: 'Moves / par',
     bestLabel: 'Best',
     levelBest: 'Best {n} moves',
@@ -77,8 +79,10 @@ const strings = {
     starPerfect: 'Perfect — that is the optimal solution.',
     starGood: 'Nice, just short of optimal.',
     starOk: 'Solved! Try it again in fewer moves.',
-    hintsUsed: '{n} hints used',
+    starHinted: 'Optimal moves! Solve it again without hints for ⭐⭐⭐.',
+    hintsUsed: '{n} hints used · max ⭐⭐ with hints',
     hintToast: 'Slide the highlighted vehicle along the arrow',
+    hintWait: 'Working out a hint…',
     hintNone: 'No hint available right now',
     undoNothing: 'Nothing to undo',
     generating: 'Generating level…',
@@ -172,26 +176,35 @@ function create(ctx: GameContext): GameInstance {
   let vis: number[] = [];
   let history: number[][] = [];
   let hint: Move | null = null;
-  let hintsUsed = 0;
+  let hintAt = 0; // performance.now() when the current hint appeared (it pulses for a while)
+  /** States (encoded) for which a hint was shown this level: repeated taps on one state count once. */
+  let hintedStates = new Set<number>();
+  let hintRequested = false;
+  /** Hint map of the current level: undefined while it is still being computed. */
   let distances: Map<number, number> | null | undefined;
   let finished = false;
   let exitT = -1; // seconds since the red car started driving out; -1 = not exiting
   let resultShown = false;
   let particles: Particle[] = [];
   let drag: { id: number; pointerId: number; origin: number; startPos: number; min: number; max: number } | null = null;
+  /** Last remix generated, so Retry does not explore again. */
+  let lastRemix: { key: string; puzzle: Puzzle; distances: Map<number, number> | null } | null = null;
 
   // ── Canvas / layout ───────────────────────────────────────────────────
   let cv: CanvasHandle | null = null;
   let offPointer: (() => void) | null = null;
   let loop: ReturnType<typeof createLoop> | null = null;
   let gameActive = false;
-  let generateTimer = 0;
+  let generating = false;
   const headerRemovers: (() => void)[] = [];
   let cell = 50;
   let wall = 8;
   let bx = 0;
   let by = 0;
+  let theme: ThemeName = ctx.theme;
   let colors = readColors();
+
+  const HINT_PULSE_MS = 3500;
 
   function readColors() {
     return {
@@ -203,15 +216,17 @@ function create(ctx: GameContext): GameInstance {
       muted: ctx.cssVar('--muted') || '#8b94a7',
       accent: ctx.cssVar('--accent') || '#5b8cff',
       success: ctx.cssVar('--success') || '#3ddc97',
-      dark: ctx.theme === 'dark',
+      dark: theme === 'dark',
     };
   }
-  ctx.onThemeChange(() => {
+  ctx.onThemeChange((next) => {
+    theme = next;
     colors = readColors();
+    draw();
   });
   ctx.onVisibility((visible) => {
     if (!gameActive || !loop) return;
-    if (visible) loop.start();
+    if (visible) invalidate();
     else loop.stop();
   });
   ctx.onDestroy(() => teardownGame());
@@ -224,6 +239,44 @@ function create(ctx: GameContext): GameInstance {
     const board = cell * SIZE;
     bx = Math.round((w - board) / 2);
     by = Math.round((h - board) / 2);
+    // Resizing clears the canvas: repaint right away (before the browser paints).
+    draw();
+  }
+
+  /**
+   * The rAF loop only runs while something moves (easing, dragging, the exit drive, confetti or a
+   * fresh hint pulse); `update` stops it once the board is still. Call this after any change.
+   */
+  function invalidate(): void {
+    if (!loop || !gameActive || document.visibilityState === 'hidden') return;
+    loop.start();
+  }
+
+  // ── Background work (time-sliced so the main thread never stalls) ──────
+  let jobToken = 0;
+  let jobTimer = 0;
+
+  function cancelJob(): void {
+    jobToken++;
+    clearTimeout(jobTimer);
+  }
+
+  /** Runs a distance exploration in ~8 ms slices and hands the result to `done`. */
+  function runExplorer(ex: DistanceExplorer, done: (result: Map<number, number> | null) => void): void {
+    cancelJob();
+    const token = jobToken;
+    const slice = () => {
+      if (token !== jobToken) return;
+      const t0 = performance.now();
+      while (!ex.step(150)) {
+        if (performance.now() - t0 > 8) {
+          jobTimer = window.setTimeout(slice, 0);
+          return;
+        }
+      }
+      done(ex.result);
+    };
+    jobTimer = window.setTimeout(slice, 0);
   }
 
   // ── Start screen ──────────────────────────────────────────────────────
@@ -300,7 +353,9 @@ function create(ctx: GameContext): GameInstance {
 
   function teardownGame(): void {
     gameActive = false;
-    clearTimeout(generateTimer);
+    generating = false;
+    hintRequested = false;
+    cancelJob();
     loop?.stop();
     loop = null;
     offPointer?.();
@@ -339,51 +394,82 @@ function create(ctx: GameContext): GameInstance {
       button(t('reset'), reset, { variant: 'secondary', class: 'rh-ctl' }),
       button(t('hint'), showHint, { variant: 'secondary', class: 'rh-ctl' }),
     );
-    root.append(hud, area, controls);
+    // Portrait: HUD / board / controls stacked. Phone landscape (CSS): board left, panel right.
+    root.append(el('div', { class: 'rh-game' }, hud, area, controls));
     undoBtns = [undoBtn];
 
     headerRemovers.push(ctx.addHeaderAction({ icon: '↶', label: t('undo'), onClick: undo }));
     headerRemovers.push(ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: reset }));
 
     gameActive = true;
+    colors = readColors();
+    puzzle = null;
+    vehicles = [];
+    hudLevel.textContent = String(level);
+    hudMoves.textContent = '— / —';
+    hudBest.textContent = '—';
+    for (const b of undoBtns) b.disabled = true;
     cv = createCanvas(area, layout);
     offPointer = onPointer(cv.canvas, { down: onDown, move: onMove, up: onUp, cancel: onCancel });
     loop = createLoop(update);
-    colors = readColors();
 
-    // Load the puzzle. Bank levels are instant; beyond the bank the generator may take a moment,
-    // so let the frame paint (and the toast show) first.
-    puzzle = null;
-    const bankLevel = level <= bankSize(d);
-    const load = () => {
-      if (!gameActive) return;
-      loadPuzzle(getPuzzle(d, level));
-    };
-    if (bankLevel) load();
-    else {
-      ctx.toast(t('generating'));
-      generateTimer = window.setTimeout(load, 40);
+    // Bank levels load instantly; their hint map is then explored in the background. Levels
+    // beyond the bank are remixed from a bank lot: the lot is explored in time slices (the board
+    // shows "Generating…"), and the same map then serves the hints.
+    const bank = bankPuzzle(d, level);
+    if (bank) {
+      loadPuzzle(bank);
+    } else {
+      const key = `${d}:${level}`;
+      if (lastRemix && lastRemix.key === key) {
+        loadPuzzle(lastRemix.puzzle, lastRemix.distances);
+      } else {
+        const plan = remixPlan(d, level);
+        generating = true;
+        runExplorer(new DistanceExplorer(plan.vehicles, plan.baseStart), (map) => {
+          if (!gameActive) return;
+          generating = false;
+          const p = finishRemix(plan, map);
+          lastRemix = { key, puzzle: p, distances: map };
+          loadPuzzle(p, map);
+        });
+      }
     }
-    if (document.visibilityState !== 'hidden') loop.start();
     draw();
+    invalidate();
   }
 
-  function loadPuzzle(p: Puzzle): void {
+  /** Starts a level from `p`; `known` is its hint map when already available. */
+  function loadPuzzle(p: Puzzle, known?: Map<number, number> | null): void {
     puzzle = p;
     vehicles = p.vehicles;
     pos = p.start.slice();
     vis = p.start.slice();
     history = [];
     hint = null;
-    hintsUsed = 0;
-    distances = undefined;
+    hintedStates = new Set();
+    hintRequested = false;
     finished = false;
     exitT = -1;
     resultShown = false;
     pending = null;
     particles = [];
     drag = null;
+    if (known !== undefined) {
+      distances = known;
+    } else {
+      distances = undefined;
+      runExplorer(new DistanceExplorer(p.vehicles, p.start), (map) => {
+        if (puzzle !== p) return;
+        distances = map;
+        if (hintRequested) {
+          hintRequested = false;
+          showHint();
+        }
+      });
+    }
     updateHud();
+    invalidate();
   }
 
   function updateHud(): void {
@@ -404,10 +490,12 @@ function create(ctx: GameContext): GameInstance {
     history.push(pos.slice());
     pos = applyMove(pos, { id, from: pos[id], to });
     hint = null;
+    hintRequested = false;
     ctx.play('move');
     ctx.haptic('light');
     updateHud();
     if (isSolved(pos)) win();
+    invalidate();
   }
 
   function undo(): void {
@@ -419,8 +507,10 @@ function create(ctx: GameContext): GameInstance {
     }
     pos = prev;
     hint = null;
+    hintRequested = false;
     ctx.play('pop');
     updateHud();
+    invalidate();
   }
 
   function reset(): void {
@@ -430,6 +520,7 @@ function create(ctx: GameContext): GameInstance {
     vis = puzzle.start.slice();
     history = [];
     hint = null;
+    hintRequested = false;
     finished = false;
     exitT = -1;
     resultShown = false;
@@ -438,11 +529,24 @@ function create(ctx: GameContext): GameInstance {
     ctx.play('swoosh');
     ctx.haptic('medium');
     updateHud();
+    invalidate();
   }
 
   function showHint(): void {
     if (!puzzle || finished || drag) return;
-    if (distances === undefined) distances = exploreDistances(vehicles, pos);
+    if (distances === undefined) {
+      // The hint map is still being explored in the background; show the hint when it is ready.
+      if (!hintRequested) ctx.toast(t('hintWait'));
+      hintRequested = true;
+      return;
+    }
+    const key = encodeState(pos);
+    if (hint && hintedStates.has(key)) {
+      // Same hint already on screen: just pulse it again, without counting another hint.
+      hintAt = performance.now();
+      invalidate();
+      return;
+    }
     const m = nextMove(vehicles, pos, distances);
     if (!m) {
       ctx.toast(t('hintNone'));
@@ -450,9 +554,11 @@ function create(ctx: GameContext): GameInstance {
       return;
     }
     hint = m;
-    hintsUsed++;
+    hintAt = performance.now();
+    hintedStates.add(key);
     ctx.play('tap');
     ctx.toast(t('hintToast'));
+    invalidate();
   }
 
   function win(): void {
@@ -466,15 +572,17 @@ function create(ctx: GameContext): GameInstance {
     recordResult();
     updateHud();
     if (reduceMotion) showResult();
+    invalidate();
   }
 
-  let pending: { stars: 1 | 2 | 3; moves: number; isBest: boolean } | null = null;
+  let pending: { stars: 1 | 2 | 3; moves: number; isBest: boolean; hints: number } | null = null;
 
   /** Persists the result immediately (the modal may be deferred until the drive-out animation ends). */
   function recordResult(): void {
     if (!puzzle) return;
     const moves = history.length;
-    const s = starsFor(moves, puzzle.par);
+    const hints = hintedStates.size;
+    const s = starsFor(moves, puzzle.par, hints > 0);
     const d = puzzle.difficulty;
     const p = progressFor(d);
     const prev = p.results[puzzle.level];
@@ -486,21 +594,22 @@ function create(ctx: GameContext): GameInstance {
     ctx.storage.set('progress', progress);
     ctx.storage.recordBest(d, p.cleared, 'higher');
     const isBest = ctx.storage.recordBest(`${d}:${puzzle.level}`, moves, 'lower');
-    pending = { stars: s, moves, isBest };
+    pending = { stars: s, moves, isBest, hints };
   }
 
   function showResult(): void {
     if (!puzzle || resultShown || !pending) return;
     resultShown = true;
-    const { stars: s, moves, isBest } = pending;
+    const { stars: s, moves, isBest, hints } = pending;
+    const note = s === 3 ? 'starPerfect' : moves <= puzzle.par ? 'starHinted' : s === 2 ? 'starGood' : 'starOk';
     const d = puzzle.difficulty;
     const body = el(
       'div',
       { class: 'rh-result' },
       el('div', { class: 'rh-result-stars', text: starText(s) }),
       el('p', { text: t('resultMoves', { m: moves, p: puzzle.par }) }),
-      el('p', { class: 'muted', text: t(s === 3 ? 'starPerfect' : s === 2 ? 'starGood' : 'starOk') }),
-      hintsUsed > 0 ? el('p', { class: 'muted small', text: t('hintsUsed', { n: hintsUsed }) }) : null,
+      el('p', { class: 'muted', text: t(note) }),
+      hints > 0 ? el('p', { class: 'muted small', text: t('hintsUsed', { n: hints }) }) : null,
       isBest ? el('p', { class: 'rh-new-best', text: '🏆 ' + t('newBest') }) : null,
     );
     const level = puzzle.level;
@@ -528,6 +637,7 @@ function create(ctx: GameContext): GameInstance {
     drag = { id, pointerId: p.id, origin: v.horiz ? p.x : p.y, startPos: pos[id], min, max };
     vis[id] = pos[id];
     ctx.play('tap');
+    invalidate();
   }
 
   function onMove(p: { x: number; y: number; id: number }): void {
@@ -535,6 +645,7 @@ function create(ctx: GameContext): GameInstance {
     const v = vehicles[drag.id];
     const delta = ((v.horiz ? p.x : p.y) - drag.origin) / cell;
     vis[drag.id] = clamp(drag.startPos + delta, drag.min, drag.max);
+    invalidate();
   }
 
   function onUp(p: { x: number; y: number; id: number }): void {
@@ -543,11 +654,13 @@ function create(ctx: GameContext): GameInstance {
     drag = null;
     const to = clamp(Math.round(vis[id]), min, max);
     if (to !== pos[id]) commitMove(id, to);
+    invalidate();
   }
 
   function onCancel(p: { x: number; y: number; id: number }): void {
     if (!drag || p.id !== drag.pointerId) return;
     drag = null;
+    invalidate();
   }
 
   // ── Animation ─────────────────────────────────────────────────────────
@@ -576,11 +689,13 @@ function create(ctx: GameContext): GameInstance {
     if (!cv) return;
     // Ease visual positions toward logical ones (except the dragged vehicle).
     const k = reduceMotion ? 1 : Math.min(1, dt * 16);
+    let moving = false;
     for (let i = 0; i < vis.length; i++) {
       if (drag && drag.id === i) continue;
       if (finished && i === RED && exitT >= 0) continue;
       const diff = pos[i] - vis[i];
       vis[i] = Math.abs(diff) < 0.004 ? pos[i] : vis[i] + diff * k;
+      if (vis[i] !== pos[i]) moving = true;
     }
     if (finished && exitT >= 0) {
       exitT += dt;
@@ -588,6 +703,7 @@ function create(ctx: GameContext): GameInstance {
       const speed = 3 + exitT * 14;
       vis[RED] = Math.min(GOAL_POS + 4, vis[RED] + speed * dt);
       if (exitT > (reduceMotion ? 0 : 0.75)) showResult();
+      if (!resultShown || vis[RED] < GOAL_POS + 4) moving = true;
     }
     if (particles.length) {
       for (const q of particles) {
@@ -600,6 +716,12 @@ function create(ctx: GameContext): GameInstance {
       particles = particles.filter((q) => q.life > 0);
     }
     draw();
+    // Nothing left to animate: stop the loop until the next change calls invalidate().
+    if (!drag && !moving && particles.length === 0 && !hintPulsing()) loop?.stop();
+  }
+
+  function hintPulsing(): boolean {
+    return !!hint && !finished && !reduceMotion && performance.now() - hintAt < HINT_PULSE_MS;
   }
 
   // ── Drawing ───────────────────────────────────────────────────────────
@@ -610,15 +732,38 @@ function create(ctx: GameContext): GameInstance {
     const H = cv.height;
     g.clearRect(0, 0, W, H);
     drawBoard(g);
-    if (!puzzle) return;
+    if (!puzzle) {
+      if (generating) drawGenerating(g);
+      return;
+    }
     const order: number[] = [];
     for (let i = 0; i < vehicles.length; i++) if (!drag || drag.id !== i) order.push(i);
     if (drag) order.push(drag.id);
-    const now = performance.now() / 1000;
+    // While the hint is fresh it pulses; afterwards it stays visible but still (so the loop can stop).
+    const now = hintPulsing() ? performance.now() / 1000 : -1;
     if (hint && !finished) drawHintTarget(g, hint);
     for (const i of order) drawVehicle(g, vehicles[i], vis[i], i, now);
     if (hint && !finished) drawHintArrow(g, hint, now);
     drawParticles(g);
+  }
+
+  function drawGenerating(g: CanvasRenderingContext2D): void {
+    const board = cell * SIZE;
+    g.fillStyle = withAlpha(colors.surface2, 0.92);
+    const w = Math.min(board - 24, 240);
+    const h = 48;
+    const x = bx + (board - w) / 2;
+    const y = by + (board - h) / 2;
+    roundRect(g, x, y, w, h, 14);
+    g.fill();
+    g.strokeStyle = colors.border;
+    g.lineWidth = 1.5;
+    g.stroke();
+    g.fillStyle = colors.text;
+    g.font = `600 ${Math.max(13, Math.round(cell * 0.28))}px -apple-system, system-ui, sans-serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(t('generating'), bx + board / 2, by + board / 2);
   }
 
   function drawBoard(g: CanvasRenderingContext2D): void {
@@ -682,7 +827,7 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function drawVehicle(g: CanvasRenderingContext2D, v: Vehicle, p: number, id: number, now: number): void {
-    const color = id === RED ? RED_COLOR : PALETTE[(id - 1) % PALETTE.length];
+    const color = id === RED ? RED_COLOR : PALETTE[(id - 1 + (puzzle?.tint ?? 0)) % PALETTE.length];
     const lifted = drag?.id === id;
     const hinted = hint?.id === id && !finished;
     const L = v.len * cell;
@@ -784,9 +929,9 @@ function create(ctx: GameContext): GameInstance {
       g.fill();
     }
 
-    // Hint pulse.
+    // Hint outline (pulsing while fresh; `now` < 0 means static).
     if (hinted) {
-      g.globalAlpha = 0.55 + 0.45 * Math.sin(now * 6);
+      g.globalAlpha = now < 0 ? 1 : 0.55 + 0.45 * Math.sin(now * 6);
       g.strokeStyle = colors.accent;
       g.lineWidth = 3;
       roundRect(g, x0 - 3, y0 - 3, w + 6, h + 6, r + 3);
@@ -812,7 +957,7 @@ function create(ctx: GameContext): GameInstance {
     const dist = Math.abs(m.to - m.from) * cell;
     const cx = v.horiz ? bx + (vis[m.id] + v.len / 2) * cell : bx + (v.lane + 0.5) * cell;
     const cy = v.horiz ? by + (v.lane + 0.5) * cell : by + (vis[m.id] + v.len / 2) * cell;
-    const bob = (Math.sin(now * 5) + 1) * 3;
+    const bob = now < 0 ? 0 : (Math.sin(now * 5) + 1) * 3;
     g.save();
     g.translate(cx, cy);
     if (!v.horiz) g.rotate(Math.PI / 2);

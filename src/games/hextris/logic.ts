@@ -255,20 +255,27 @@ export function stepFalling(state: SimState, dt: number, speed: number): Landed[
   return landed;
 }
 
+/** Extra spawn weight per block on the stack a lane faces (see pickLane). */
+export const TALL_WEIGHT = 0.5;
+
 /**
  * Choose a lane for the next block, or -1 when every lane is busy. Lanes whose outermost block is still
- * within `minGap` levels of the spawn point, or that already hold `maxInFlight` blocks, are skipped;
- * the previous lane is avoided when there is any alternative.
+ * within `minGap` levels of the spawn point, or that already hold `maxInFlight` blocks, are skipped.
+ * Free lanes are weighted by `1 + TALL_WEIGHT × height` of the stack they currently face
+ * (`heights[lane]`), so blocks drift toward tall stacks: a player who never steers them away overflows
+ * much sooner, while an evenly spread board (which tends to clear itself) is not handed out for free.
  */
 export function pickLane(
   falling: { lane: number; pos: number }[],
   spawnDist: number,
-  lastLane: number,
+  heights: number[],
   rand: () => number,
   minGap = 1.6,
   maxInFlight = 2,
 ): number {
   const candidates: number[] = [];
+  const weights: number[] = [];
+  let total = 0;
   for (let lane = 0; lane < SIDES; lane++) {
     let count = 0;
     let blocked = false;
@@ -277,23 +284,255 @@ export function pickLane(
       count++;
       if (f.pos > spawnDist - minGap) blocked = true;
     }
-    if (!blocked && count < maxInFlight) candidates.push(lane);
+    if (blocked || count >= maxInFlight) continue;
+    const w = 1 + TALL_WEIGHT * Math.max(0, heights[lane] ?? 0);
+    candidates.push(lane);
+    weights.push(w);
+    total += w;
   }
   if (!candidates.length) return -1;
-  const pool = candidates.length > 1 ? candidates.filter((l) => l !== lastLane) : candidates;
-  return pool[Math.min(pool.length - 1, Math.floor(rand() * pool.length))];
+  let x = rand() * total;
+  for (let i = 0; i < candidates.length; i++) {
+    x -= weights[i];
+    if (x < 0) return candidates[i];
+  }
+  return candidates[candidates.length - 1];
 }
+
+/** Height of the stack each world lane currently faces. */
+export function laneHeights(sim: SimState): number[] {
+  return Array.from({ length: SIDES }, (_, lane) => sim.stacks[localSide(lane, sim.rotation)].length);
+}
+
+/** Default probability that a new block copies a top-of-stack colour (see pickColor). */
+export const COLOR_BIAS = 0.3;
 
 /**
  * Choose a colour: with probability `bias` one that is currently on top of some stack (keeps the game
- * matchable), otherwise uniform over the palette.
+ * matchable), otherwise uniform over the palette. `avoidSide` (the side the spawn lane faces right now)
+ * is left out of the biased choice, so the helpful colour usually has to be *steered* to its match:
+ * a player who never rotates gets no free matches from the bias.
  */
-export function pickColor(stacks: Stacks, colors: number, rand: () => number, bias = 0.35): number {
+export function pickColor(stacks: Stacks, colors: number, rand: () => number, bias = COLOR_BIAS, avoidSide = -1): number {
   if (rand() < bias) {
-    const tops = stacks.filter((s) => s.length > 0).map((s) => s[s.length - 1]).filter((c) => c < colors);
+    const tops: number[] = [];
+    stacks.forEach((s, side) => {
+      if (side !== avoidSide && s.length > 0 && s[s.length - 1] < colors) tops.push(s[s.length - 1]);
+    });
     if (tops.length) return tops[Math.min(tops.length - 1, Math.floor(rand() * tops.length))];
   }
   return Math.min(colors - 1, Math.floor(rand() * colors));
+}
+
+// ── Game core: spawning, landing, clearing, cascades and overflow ──────────
+// Everything the UI needs to run a round, as plain data, so it can be unit tested and simulated
+// headlessly. The UI only turns the returned events into sounds, particles and text.
+
+/** Seconds a cleared group flashes before it is removed. */
+export const CLEAR_DUR = 0.32;
+/** Delay before the first block of a round appears. */
+export const FIRST_SPAWN = 0.4;
+/** Retry delay when every lane is busy. */
+export const SPAWN_RETRY = 0.12;
+
+export interface ClearCell extends Cell {
+  color: number;
+}
+
+export interface ClearGroup {
+  cells: ClearCell[];
+  points: number;
+  /** Combo count this group was scored with. */
+  combo: number;
+}
+
+export interface Core {
+  cfg: ModeConfig;
+  sim: SimState;
+  /** Seconds of play (excludes pauses). */
+  elapsed: number;
+  level: number;
+  score: number;
+  combo: number;
+  /** `elapsed` at the latest clear. */
+  lastClearAt: number;
+  spawnT: number;
+  nextId: number;
+  /**
+   * Cells flashing before removal. While a clear runs, stacks only grow on top (landings push), so the
+   * stored (side, level) keys stay valid until the clear finishes.
+   */
+  clearing: { cells: Map<string, ClearCell>; t: number } | null;
+  /** Sides that overflowed; set once the round is lost (the core then ignores further input). */
+  over: number[] | null;
+}
+
+export interface CoreEvents {
+  landed: Landed[];
+  /** Groups that started clearing (already scored). */
+  cleared: ClearGroup[];
+  /** Cells removed when a clear animation finished. */
+  removed: ClearCell[];
+  levelUp: boolean;
+  /** Overflowing sides, on the step the round is lost. */
+  over: number[] | null;
+}
+
+export function emptyEvents(): CoreEvents {
+  return { landed: [], cleared: [], removed: [], levelUp: false, over: null };
+}
+
+export function createCore(cfg: ModeConfig): Core {
+  return {
+    cfg,
+    sim: createSim(),
+    elapsed: 0,
+    level: 1,
+    score: 0,
+    combo: 0,
+    lastClearAt: -999,
+    spawnT: FIRST_SPAWN,
+    nextId: 1,
+    clearing: null,
+    over: null,
+  };
+}
+
+function checkOverflow(core: Core, ev: CoreEvents): void {
+  const sides = overflowSides(core.sim.stacks, core.cfg.maxLevels);
+  if (sides.length) {
+    core.over = sides;
+    ev.over = sides;
+  }
+}
+
+function startClear(core: Core, groups: Cell[][], ev: CoreEvents): void {
+  core.combo = nextCombo(core.combo, core.elapsed - core.lastClearAt);
+  core.lastClearAt = core.elapsed;
+  if (!core.clearing) core.clearing = { cells: new Map(), t: 0 };
+  for (const g of groups) {
+    const cells: ClearCell[] = g.map((c) => ({ side: c.side, level: c.level, color: core.sim.stacks[c.side][c.level] }));
+    for (const c of cells) core.clearing.cells.set(cellKey(c.side, c.level), c);
+    const points = clearScore(g.length, core.combo);
+    core.score += points;
+    ev.cleared.push({ cells, points, combo: core.combo });
+  }
+}
+
+/**
+ * React to blocks that just landed: start clearing any new group (cells already clearing count as
+ * empty), otherwise check for overflow. Overflow is only judged on a settled board: while a clear is
+ * running it waits for the clear (and any cascade) to finish, since those may lower the stack.
+ */
+function afterLanding(core: Core, landed: Landed[], ev: CoreEvents): void {
+  if (!landed.length) return;
+  ev.landed.push(...landed);
+  const ignore = core.clearing ? new Set(core.clearing.cells.keys()) : undefined;
+  const groups = findGroups(core.sim.stacks, ignore);
+  if (groups.length) startClear(core, groups, ev);
+  else if (!core.clearing) checkOverflow(core, ev);
+}
+
+/** Remove the flashed cells, apply gravity, then chain into the next clear or judge overflow. */
+function finishClear(core: Core, ev: CoreEvents): void {
+  if (!core.clearing) return;
+  const cells = [...core.clearing.cells.values()];
+  core.sim.stacks = removeCells(core.sim.stacks, cells);
+  core.clearing = null;
+  ev.removed.push(...cells);
+  const groups = findGroups(core.sim.stacks);
+  if (groups.length) startClear(core, groups, ev);
+  else checkOverflow(core, ev);
+}
+
+/** Spawn one block in a free lane. Returns false when every lane is busy. */
+export function coreSpawn(core: Core, rand: () => number): boolean {
+  const dist = spawnDistance(core.cfg);
+  const lane = pickLane(core.sim.falling, dist, laneHeights(core.sim), rand);
+  if (lane < 0) return false;
+  const color = pickColor(core.sim.stacks, core.cfg.colors, rand, COLOR_BIAS, localSide(lane, core.sim.rotation));
+  core.sim.falling.push({ id: core.nextId++, lane, pos: dist, color });
+  return true;
+}
+
+/** Advance a running round by `dt` seconds. */
+export function coreTick(core: Core, dt: number, rand: () => number): CoreEvents {
+  const ev = emptyEvents();
+  if (core.over) return ev;
+  core.elapsed += dt;
+  const nl = levelFor(core.elapsed, core.score);
+  if (nl !== core.level) {
+    core.level = nl;
+    ev.levelUp = true;
+  }
+  core.spawnT -= dt;
+  if (core.spawnT <= 0) core.spawnT = coreSpawn(core, rand) ? core.spawnT + spawnInterval(core.cfg, core.level) : SPAWN_RETRY;
+  afterLanding(core, stepFalling(core.sim, dt, fallSpeed(core.cfg, core.level)), ev);
+  if (core.clearing && !core.over) {
+    core.clearing.t += dt;
+    if (core.clearing.t >= CLEAR_DUR) finishClear(core, ev);
+  }
+  return ev;
+}
+
+/**
+ * Turn the hexagon by `steps` (negative = counter-clockwise), one 60° step at a time. After each step a
+ * falling block that now faces a taller stack lands on it immediately.
+ */
+export function coreRotate(core: Core, steps: number): CoreEvents {
+  const ev = emptyEvents();
+  const dir = Math.sign(steps);
+  for (let i = 0; i < Math.abs(steps) && !core.over; i++) {
+    core.sim.rotation += dir;
+    afterLanding(core, stepFalling(core.sim, 0, 0), ev);
+  }
+  return ev;
+}
+
+// ── Touch gestures ───────────────────────────────────────────────────────
+// A touch is undecided until it either moves far enough sideways to be a swipe or is released (a
+// tap). Nothing rotates before that decision, so a swipe that starts on the "wrong" half never turns
+// the hexagon the wrong way first (which could land a block on the wrong side).
+
+/** Horizontal drag (CSS px) that turns a touch into a swipe, and the extra drag per further step. */
+export const SWIPE_START = 22;
+export const SWIPE_STEP = 64;
+/** A touch that wandered further than this vertically is not a tap. */
+export const TAP_MAX_DY = 48;
+
+export interface Gesture {
+  x0: number;
+  y0: number;
+  /** -1 when the touch started on the left half (counter-clockwise), +1 on the right half. */
+  tapDir: number;
+  swiping: boolean;
+  /** Net steps this swipe has already applied. */
+  applied: number;
+  maxDy: number;
+}
+
+export function gestureStart(x: number, y: number, width: number): Gesture {
+  return { x0: x, y0: y, tapDir: x < width / 2 ? -1 : 1, swiping: false, applied: 0, maxDy: 0 };
+}
+
+/** Rotation steps to apply now that the pointer moved to (x, y). */
+export function gestureMove(g: Gesture, x: number, y: number): number {
+  const dx = x - g.x0;
+  const adx = Math.abs(dx);
+  g.maxDy = Math.max(g.maxDy, Math.abs(y - g.y0));
+  if (!g.swiping && adx < SWIPE_START) return 0;
+  g.swiping = true;
+  const target = adx < SWIPE_START ? 0 : Math.sign(dx) * (1 + Math.floor((adx - SWIPE_START) / SWIPE_STEP));
+  const delta = target - g.applied;
+  g.applied = target;
+  return delta;
+}
+
+/** Rotation steps to apply when the pointer is released at (x, y): a tap turns toward the touched half. */
+export function gestureEnd(g: Gesture, x: number, y: number): number {
+  const delta = gestureMove(g, x, y);
+  if (g.swiping) return delta;
+  return g.maxDy <= TAP_MAX_DY ? g.tapDir : 0;
 }
 
 // ── Board geometry ──────────────────────────────────────────────────────

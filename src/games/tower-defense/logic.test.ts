@@ -628,6 +628,68 @@ describe('targeting', () => {
     expect(t.cooldown).toBeGreaterThan(-1);
   });
 
+  it('tick(): a "strongest" sniper switches from a tank to a boss that enters range on its next shot', () => {
+    const { s, t } = setup('sniper');
+    s.wave = 10;
+    const dmg = TOWER_DEFS.sniper.levels[0].dmg;
+    const tank = makeEnemy(s, 'tank', 4.5);
+    tank.speed = 0;
+    tick(s, DT);
+    expect(t.targetId).toBe(tank.id);
+    expect(tank.hp).toBe(tank.maxHp - dmg);
+    const boss = makeEnemy(s, 'boss', 5.5);
+    boss.speed = 0;
+    expect(boss.maxHp).toBeGreaterThan(tank.hp);
+    // Exactly one more shot: it must go to the boss, not to the tank the sniper was already aiming at.
+    run(s, 1 / TOWER_DEFS.sniper.levels[0].rate + 0.05);
+    expect(tank.hp).toBe(tank.maxHp - dmg);
+    expect(boss.hp).toBe(boss.maxHp - dmg * TOWER_DEFS.sniper.bossMult);
+    expect(t.targetId).toBe(boss.id);
+  });
+
+  it('tick(): a "first" arrow moves to an enemy further along the path on its next shot', () => {
+    const { s, t } = setup('arrow');
+    const rear = makeEnemy(s, 'tank', 3);
+    const front = makeEnemy(s, 'tank', 6);
+    for (const e of [rear, front]) {
+      e.speed = 0;
+      e.hp = e.maxHp = 1e6;
+    }
+    // Only the rear enemy exists for the first shot.
+    s.enemies = [rear];
+    tick(s, DT);
+    expect(t.targetId).toBe(rear.id);
+    s.enemies.push(front);
+    run(s, 1.5);
+    const dmg = TOWER_DEFS.arrow.levels[0].dmg;
+    // The arrow already in flight lands on the rear enemy; every later shot goes to the front one.
+    expect(rear.maxHp - rear.hp).toBe(dmg);
+    expect(front.maxHp - front.hp).toBeGreaterThanOrEqual(dmg * 2);
+    expect(t.targetId).toBe(front.id);
+    // Switching the mode is honoured at once as well.
+    rear.hp = rear.maxHp = 2e6;
+    setTargeting(s, t.id, 'strongest');
+    const before = rear.hp;
+    run(s, 1 / TOWER_DEFS.arrow.levels[0].rate + 0.3);
+    expect(rear.hp).toBeLessThan(before);
+  });
+
+  it('tick(): keeps firing at the current best target and drops it once it is gone', () => {
+    const { s, t } = setup('sniper');
+    const a = makeEnemy(s, 'normal', 4.5);
+    a.speed = 0;
+    a.hp = a.maxHp = 1e6;
+    tick(s, DT);
+    expect(t.targetId).toBe(a.id);
+    a.hp = 0;
+    tick(s, DT);
+    expect(s.enemies).toHaveLength(0);
+    t.cooldown = 0;
+    tick(s, DT);
+    expect(t.targetId).toBeNull();
+    expect(t.cooldown).toBe(0);
+  });
+
   it('respects the fire rate', () => {
     const { s, t } = setup('arrow');
     const e = makeEnemy(s, 'tank', 4.5);

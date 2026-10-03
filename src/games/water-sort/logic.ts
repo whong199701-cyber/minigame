@@ -31,8 +31,10 @@ export interface Level {
   solution: Move[];
   /** Which seed offset produced this level (0 = first try). */
   attempt: number;
-  /** True when the level was built by a reverse walk because random scrambles kept failing. */
+  /** True when the level was built by the hill-climb because random scrambles kept failing. */
   fallback: boolean;
+  /** Solver nodes expanded while generating (a machine-independent cost measure). */
+  work: number;
 }
 
 export type SolveResult =
@@ -181,24 +183,33 @@ export function hasMoves(state: State): boolean {
 
 // ── Hashing & heuristic ─────────────────────────────────────────────────
 
-const tubeKeyCache = new WeakMap<Tube, string>();
-
-function tubeKey(tube: Tube): string {
-  let k = tubeKeyCache.get(tube);
-  if (k === undefined) {
-    k = '';
-    for (let i = 0; i < tube.length; i++) k += String.fromCharCode(65 + tube[i]);
-    tubeKeyCache.set(tube, k);
-  }
+/**
+ * A tube as a small integer: its units (colour + 1) read as base-13 digits. With at most CAP = 4 units
+ * and MAX_COLOURS = 12 colours this is below 13^4 = 28561, so it fits in one UTF-16 code unit, and
+ * distinct tubes always get distinct codes (no digit is 0, so lengths cannot collide).
+ */
+function tubeCode(tube: Tube): number {
+  let k = 0;
+  for (let i = 0; i < tube.length; i++) k = k * 13 + tube[i] + 1;
   return k;
 }
 
-/** Canonical key: tube order is irrelevant, so tubes are sorted before joining. */
+const keyScratch: number[] = [];
+
+/** Canonical key: tube order is irrelevant, so the tube codes are sorted before joining. */
 export function stateKey(state: State): string {
-  const keys = new Array<string>(state.length);
-  for (let i = 0; i < state.length; i++) keys[i] = tubeKey(state[i]);
-  keys.sort();
-  return keys.join('|');
+  const codes = keyScratch;
+  codes.length = state.length;
+  for (let i = 0; i < state.length; i++) {
+    const c = tubeCode(state[i]);
+    let j = i - 1;
+    while (j >= 0 && codes[j] > c) {
+      codes[j + 1] = codes[j];
+      j--;
+    }
+    codes[j + 1] = c;
+  }
+  return String.fromCharCode.apply(null, codes);
 }
 
 /** Number of maximal same-colour blocks in a tube. */
@@ -214,15 +225,18 @@ export function countBlocks(tube: Tube): number {
  * must move at least once, and among tubes sharing the same bottom colour all but one must empty
  * that bottom block. Each pour reduces this count by at most one.
  */
+const bottomScratch = new Int32Array(MAX_COLOURS);
+
 export function heuristic(state: State): number {
   let h = 0;
-  const bottoms = new Array<number>(MAX_COLOURS).fill(0);
+  const bottoms = bottomScratch;
+  bottoms.fill(0);
   for (const t of state) {
     if (t.length === 0) continue;
     h += countBlocks(t) - 1;
     bottoms[t[0]]++;
   }
-  for (const b of bottoms) if (b > 1) h += b - 1;
+  for (let c = 0; c < MAX_COLOURS; c++) if (bottoms[c] > 1) h += bottoms[c] - 1;
   return h;
 }
 
@@ -394,9 +408,23 @@ export function reverseWalk(colours: number, empties: number, steps: number, ran
   return tubes;
 }
 
-/** Minimum par for a scrambled level to count as non-trivial (random boards usually sit near 3x). */
+/** Minimum par for any level to count as non-trivial (random boards usually sit near 3x). */
 export function minParFor(colours: number): number {
   return colours * 2;
+}
+
+/**
+ * Par a challenge level (a single empty tube) aims for: about as tangled as a random solvable board,
+ * so the "every move counts" levels need about as many moves as their neighbours with half the room.
+ */
+export function challengeParFor(colours: number): number {
+  return colours * 3;
+}
+
+/** Par the generator aims for on a given level. */
+export function targetParFor(level: number): number {
+  const colours = colourCountFor(level);
+  return isChallengeLevel(level) ? challengeParFor(colours) : minParFor(colours);
 }
 
 function levelSeed(level: number, attempt: number): number {
@@ -404,46 +432,123 @@ function levelSeed(level: number, attempt: number): number {
 }
 
 const MAX_SCRAMBLE_ATTEMPTS = 24;
-const WALK_CANDIDATES = 10;
+/** Seed offset used by the hill-climb generator. */
+const CLIMB_SEED = 1000;
+/** Swaps tried before settling for any board that reaches the floor par. */
+const CLIMB_ITERS = 600;
+/** Hard cap on swaps (only reached if even the floor par is elusive). */
+const CLIMB_MAX_ITERS = 3000;
+/** Solver nodes per candidate board in the climb (exact A*, so par stays optimal). */
+const CLIMB_SOLVE_CAP = 40000;
+/** Total solver nodes after which the climb accepts its best board once it reaches the floor par. */
+const CLIMB_WORK_BUDGET = 30000;
+
+export interface ClimbResult {
+  tubes: State;
+  moves: Move[];
+  /** Solver nodes expanded. */
+  work: number;
+}
+
+/**
+ * Hill-climb towards a hard board that is still solvable. Starts from a reverse walk (always solvable),
+ * then repeatedly swaps two random units between different tubes and keeps the swap when the board
+ * stays solvable and its optimal solution is no shorter than the current one (so the walk drifts
+ * towards longer solutions). Stops at the first board without finished tubes whose par
+ * reaches `goal`; after CLIMB_ITERS swaps (or CLIMB_WORK_BUDGET solver nodes) it settles for the best
+ * board so far once that reaches `floor`. Every reported par is an exact A* optimum. Deterministic for
+ * a given `rand`.
+ */
+export function climbBoard(colours: number, empties: number, rand: () => number, goal: number, floor: number): ClimbResult | null {
+  let work = 0;
+  let cur: State | null = null;
+  let curPar = 0;
+  let best: ClimbResult | null = null;
+  const consider = (tubes: State, moves: Move[]): void => {
+    if (tubes.some(isComplete) || isSolved(tubes)) return;
+    if (!best || moves.length > best.moves.length) best = { tubes, moves, work: 0 };
+  };
+  for (let tries = 0; tries < 50 && !cur; tries++) {
+    const s = reverseWalk(colours, empties, colours * 25, rand);
+    if (s.filter((t) => t.length === 0).length !== empties) continue;
+    const r = solve(s, { maxNodes: CLIMB_SOLVE_CAP });
+    work += r.nodes;
+    if (r.status !== 'solved') continue;
+    cur = s;
+    curPar = r.moves.length;
+    consider(s, r.moves);
+  }
+  if (!cur) return null;
+  const done = (it: number): boolean => {
+    const b = best as ClimbResult | null;
+    if (!b) return false;
+    const par = b.moves.length;
+    if (par >= goal) return true;
+    return par >= floor && (it >= CLIMB_ITERS || work >= CLIMB_WORK_BUDGET);
+  };
+  for (let it = 0; it < CLIMB_MAX_ITERS && !done(it); it++) {
+    const filled: number[] = [];
+    for (let i = 0; i < cur.length; i++) if (cur[i].length > 0) filled.push(i);
+    if (filled.length < 2) break;
+    const ai = Math.floor(rand() * filled.length);
+    let bi = Math.floor(rand() * (filled.length - 1));
+    if (bi >= ai) bi++;
+    const a = filled[ai];
+    const b = filled[bi];
+    const i = Math.floor(rand() * cur[a].length);
+    const j = Math.floor(rand() * cur[b].length);
+    if (cur[a][i] === cur[b][j]) continue;
+    const cand = cur.slice();
+    cand[a] = cur[a].slice();
+    cand[b] = cur[b].slice();
+    cand[a][i] = cur[b][j];
+    cand[b][j] = cur[a][i];
+    const r = solve(cand, { maxNodes: CLIMB_SOLVE_CAP });
+    work += r.nodes;
+    if (r.status !== 'solved' || r.moves.length < curPar) continue;
+    cur = cand;
+    curPar = r.moves.length;
+    consider(cand, r.moves);
+  }
+  const b = best as ClimbResult | null;
+  return b ? { tubes: b.tubes, moves: b.moves, work } : null;
+}
 
 /**
  * Deterministic level generation: scramble from seededRandom(level + offset), verify with the solver,
  * reject trivial or unsolvable boards and retry with the next offset. Boards with a single empty tube
- * are rarely solvable at random, so after MAX_SCRAMBLE_ATTEMPTS the hardest of several reverse walks
- * (guaranteed solvable, verified again by the solver) is used so a level always exists.
+ * are rarely solvable at random (about 1 in 300 with 10 colours, practically never with 12), so when
+ * the scrambles run out a hill-climb from a reverse walk builds a solvable board instead. Every level
+ * reaches at least minParFor(colours); challenge levels aim for challengeParFor(colours).
  */
 export function generateLevel(level: number): Level {
   const lv = Math.max(1, Math.floor(level));
   const colours = colourCountFor(lv);
   const empties = emptyCountFor(lv);
-  const minPar = minParFor(colours);
+  const floor = minParFor(colours);
+  const goal = targetParFor(lv);
+  let work = 0;
   for (let attempt = 0; attempt < MAX_SCRAMBLE_ATTEMPTS; attempt++) {
     const rand = seededRandom(levelSeed(lv, attempt));
     const tubes = scramble(colours, empties, rand);
     if (tubes.some(isComplete)) continue;
     const res = solveForPlay(tubes);
+    work += res.nodes;
     if (res.status !== 'solved') continue;
-    if (res.moves.length < minPar) continue;
-    return { level: lv, colours, empties, tubes, par: res.moves.length, solution: res.moves, attempt, fallback: false };
+    if (res.moves.length < goal) continue;
+    return { level: lv, colours, empties, tubes, par: res.moves.length, solution: res.moves, attempt, fallback: false, work };
   }
-  let best: Level | null = null;
-  for (let attempt = 0; attempt < WALK_CANDIDATES || (!best && attempt < 200); attempt++) {
-    const rand = seededRandom(levelSeed(lv, 1000 + attempt));
-    const tubes = reverseWalk(colours, empties, colours * 25, rand);
-    if (tubes.filter((t) => t.length === 0).length !== empties) continue;
-    if (tubes.some(isComplete) && attempt < 100) continue;
-    const res = solveForPlay(tubes);
-    if (res.status !== 'solved') continue;
-    if (!best || res.moves.length > best.par) {
-      best = { level: lv, colours, empties, tubes, par: res.moves.length, solution: res.moves, attempt: 1000 + attempt, fallback: true };
-    }
+  const climbed = climbBoard(colours, empties, seededRandom(levelSeed(lv, CLIMB_SEED)), goal, floor);
+  if (climbed) {
+    work += climbed.work;
+    return { level: lv, colours, empties, tubes: climbed.tubes, par: climbed.moves.length, solution: climbed.moves, attempt: CLIMB_SEED, fallback: true, work };
   }
-  if (best) return best;
   // Unreachable in practice (a reverse walk is always solvable); keep a safe, playable answer anyway.
   const tubes = reverseWalk(colours, empties, colours * 25, seededRandom(levelSeed(lv, 9999)));
   const res = solveForPlay(tubes, { exact: 60000, greedy: 200000 });
+  work += res.nodes;
   const solution = res.status === 'solved' ? res.moves : [];
-  return { level: lv, colours, empties, tubes, par: Math.max(1, solution.length), solution, attempt: 9999, fallback: true };
+  return { level: lv, colours, empties, tubes, par: Math.max(1, solution.length), solution, attempt: 9999, fallback: true, work };
 }
 
 /** Star rating: 3 at or under par, 2 within a small margin, else 1. */

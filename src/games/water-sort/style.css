@@ -66,9 +66,11 @@
   font-weight: 600;
 }
 .ws-picker {
+  /* Exactly two rows of chips: 4 + 46 + 6 + 46 + 4. Chips are scrolled into place row by row. */
+  position: relative;
   width: 100%;
   max-width: 360px;
-  max-height: 112px;
+  max-height: 106px;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   display: flex;
@@ -122,6 +124,43 @@
   min-width: 180px;
 }
 
+/* Short screens (phones in landscape): two columns so Play stays above the fold. */
+@media (max-height: 520px) and (min-width: 560px) {
+  .ws-start {
+    padding: 8px 20px;
+  }
+  .ws-start-inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 24px;
+    row-gap: 6px;
+    justify-items: center;
+    align-items: center;
+    max-width: 780px;
+  }
+  .ws-start-inner > * {
+    grid-column: 1;
+  }
+  .ws-start-inner > .ws-picker {
+    grid-column: 2;
+    grid-row: 1 / span 7;
+    align-self: center;
+    /* Four rows: 4 + 4 * 46 + 3 * 6 + 4. */
+    max-height: 210px;
+  }
+  .ws-start .big-icon {
+    font-size: 40px;
+    margin-bottom: 0;
+  }
+}
+/* Short and narrow: drop the decoration instead. */
+@media (max-height: 520px) and (max-width: 559px) {
+  .ws-start .big-icon,
+  .ws-desc {
+    display: none;
+  }
+}
+
 /* ── In-game ───────────────────────────────────────────────────────── */
 .ws-hud {
   padding: 6px 12px 2px;
@@ -133,10 +172,6 @@
 .ws-hud .stat-value {
   font-size: 17px;
   white-space: nowrap;
-}
-.ws-hud .stat-value.ws-stars-value {
-  color: var(--warning);
-  letter-spacing: 1px;
 }
 .ws-hud .stat-label {
   white-space: nowrap;

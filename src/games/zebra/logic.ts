@@ -17,6 +17,18 @@ export const DIFFICULTIES: Record<Difficulty, DiffConfig> = {
 };
 export const DIFFICULTY_LIST: Difficulty[] = ['easy', 'medium', 'hard'];
 
+/** Time penalties in seconds. */
+export const HINT_PENALTY = 30;
+/**
+ * A failed Check costs time so the wrong-cell counter cannot be used as a free oracle to brute-force the grid
+ * (fill, check, swap, check, …) instead of reasoning from the clues.
+ */
+export const CHECK_PENALTY = 15;
+
+export function penaltySeconds(hints: number, failedChecks: number): number {
+  return hints * HINT_PENALTY + failedChecks * CHECK_PENALTY;
+}
+
 export type ClueType = 'at' | 'same' | 'leftOf' | 'nextTo' | 'somewhereLeft' | 'notAt' | 'notSame' | 'atEnd';
 export const CLUE_TYPES: ClueType[] = ['at', 'same', 'leftOf', 'nextTo', 'somewhereLeft', 'notAt', 'notSame', 'atEnd'];
 /** Clue types that reference two items. */
@@ -504,22 +516,37 @@ export function buildCluePool(pos: number[][], n: number, k: number, rand: () =>
 
 /** Sampling weights per clue type (higher = picked earlier). */
 const WEIGHTS: Record<Difficulty, Record<ClueType, number>> = {
-  easy: { at: 1.1, same: 1.2, leftOf: 1.0, nextTo: 0.8, somewhereLeft: 0.45, notAt: 0.5, notSame: 0.3, atEnd: 0.6 },
-  medium: { at: 0.6, same: 1.0, leftOf: 1.0, nextTo: 1.0, somewhereLeft: 0.55, notAt: 0.5, notSame: 0.5, atEnd: 0.7 },
-  hard: { at: 0.2, same: 0.9, leftOf: 1.0, nextTo: 1.1, somewhereLeft: 0.6, notAt: 0.55, notSame: 0.8, atEnd: 0.8 },
+  easy: { at: 4, same: 1.6, leftOf: 1.0, nextTo: 0.7, somewhereLeft: 0.4, notAt: 0.5, notSame: 0.3, atEnd: 0.6 },
+  medium: { at: 3.0, same: 1.0, leftOf: 1.0, nextTo: 1.0, somewhereLeft: 0.6, notAt: 0.5, notSame: 0.5, atEnd: 0.7 },
+  hard: { at: 0.2, same: 0.8, leftOf: 1.0, nextTo: 1.1, somewhereLeft: 0.7, notAt: 0.55, notSame: 0.9, atEnd: 0.8 },
 };
-/** Preferred minimum solver search nodes (case analysis) for the final puzzle; best effort within the attempt budget. */
-const MIN_RATING: Record<Difficulty, number> = { easy: 0, medium: 0, hard: 2 };
+/**
+ * Accepted band of solver search nodes (how much case analysis pure propagation leaves) for the final puzzle.
+ * The lower bound keeps hard puzzles from collapsing into chains of forced moves; the upper bound rejects rare
+ * outliers that need heavy trial and error (e.g. a medium puzzle harder than a typical hard one).
+ * Best effort: when no attempt lands in the band, the closest candidate is used.
+ */
+export const RATING_RANGE: Record<Difficulty, { min: number; max: number }> = {
+  easy: { min: 0, max: 6 },
+  medium: { min: 1, max: 20 },
+  hard: { min: 4, max: 45 },
+};
 /** Max number of direct "X is in house k" clues allowed into the pool. */
-export const AT_CAP: Record<Difficulty, number> = { easy: 3, medium: 2, hard: 1 };
+export const AT_CAP: Record<Difficulty, number> = { easy: 4, medium: 2, hard: 1 };
+
+/** Distance of a rating from the accepted band of a difficulty (0 = inside). */
+export function ratingDistance(difficulty: Difficulty, rating: number): number {
+  const { min, max } = RATING_RANGE[difficulty];
+  return rating < min ? min - rating : rating > max ? rating - max : 0;
+}
 /**
  * Removal priority during minimisation (lower = removed preferentially). Easy keeps direct clues and sheds
- * vague ones; medium/hard shed direct position clues first and otherwise remove in random order so the
- * surviving relational clues stay varied.
+ * vague ones; medium keeps the odd direct anchor; hard sheds direct position clues first. Otherwise clues are
+ * removed in random order so the surviving relational clues stay varied.
  */
 const REMOVE_PRIORITY: Record<Difficulty, Partial<Record<ClueType, number>>> = {
   easy: { notSame: 0, notAt: 1, somewhereLeft: 2, atEnd: 3, nextTo: 4, leftOf: 5, same: 6, at: 7 },
-  medium: { at: 0, notAt: 1 },
+  medium: { notAt: 1, at: 4 },
   hard: { at: 0, notAt: 1 },
 };
 const DEFAULT_PRIORITY = 3;
@@ -577,7 +604,7 @@ export interface GenerateOptions {
 /** Generate a puzzle with a unique solution. Always returns a valid puzzle (falls back to direct clues). */
 export function generatePuzzle(difficulty: Difficulty, rand: () => number = Math.random, opts: GenerateOptions = {}): Puzzle {
   const { n, k } = DIFFICULTIES[difficulty];
-  const maxAttempts = opts.maxAttempts ?? 12;
+  const maxAttempts = opts.maxAttempts ?? 16;
   const budget = opts.nodeBudget ?? 40000;
   let fallback: Puzzle | null = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -591,8 +618,9 @@ export function generatePuzzle(difficulty: Difficulty, rand: () => number = Math
     const built = buildClueSet(pool, n, k, difficulty, rand, budget);
     if (!built) continue;
     const puzzle: Puzzle = { difficulty, n, k, solution, clues: shuffleInPlace(built.clues, rand), rating: built.rating };
-    if (puzzle.rating >= MIN_RATING[difficulty]) return puzzle;
-    if (!fallback || puzzle.rating > fallback.rating) fallback = puzzle;
+    const dist = ratingDistance(difficulty, puzzle.rating);
+    if (dist === 0) return puzzle;
+    if (!fallback || dist < ratingDistance(difficulty, fallback.rating)) fallback = puzzle;
   }
   if (fallback) return fallback;
   // Fallback (practically unreachable): direct clues for all but one item per category.
@@ -669,4 +697,122 @@ export function pickHint(table: Table, pos: number[][], rand: () => number = Mat
   const list = wrong.length ? wrong : empty;
   if (!list.length) return null;
   return list[Math.floor(rand() * list.length)];
+}
+
+// ── Saved game (resume an unfinished puzzle) ────────────────────────────
+
+export const SAVE_VERSION = 1;
+
+export interface SavedGame {
+  v: number;
+  puzzle: Puzzle;
+  table: Table;
+  /** Cells revealed by hints (always correct, cannot be edited). */
+  locked: boolean[][];
+  /** Clues the player struck through. */
+  struck: boolean[];
+  hints: number;
+  failedChecks: number;
+  /** Clock time spent so far, excluding penalties. */
+  elapsedMs: number;
+}
+
+const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
+const isInt = (x: unknown, lo: number, hi: number): x is number => typeof x === 'number' && Number.isInteger(x) && x >= lo && x <= hi;
+
+function parseRef(x: unknown, n: number, k: number): ItemRef | null {
+  if (!isObj(x) || !isInt(x.cat, 0, k - 1) || !isInt(x.item, 0, n - 1)) return null;
+  return { cat: x.cat, item: x.item };
+}
+
+function parseClue(x: unknown, n: number, k: number): Clue | null {
+  if (!isObj(x) || !CLUE_TYPES.includes(x.type as ClueType)) return null;
+  const type = x.type as ClueType;
+  const a = parseRef(x.a, n, k);
+  if (!a) return null;
+  if (type === 'at' || type === 'notAt') return isInt(x.k, 0, n - 1) ? { type, a, k: x.k } : null;
+  if (type === 'atEnd') return { type, a };
+  const b = parseRef(x.b, n, k);
+  if (!b || (a.cat === b.cat && a.item === b.item)) return null;
+  return { type, a, b };
+}
+
+/**
+ * Validate an untrusted saved game (from storage) for a difficulty. Returns a clean copy, or null when anything is
+ * malformed, inconsistent with the difficulty, or not a uniquely solvable puzzle whose solution is the stored one.
+ */
+export function parseSave(raw: unknown, difficulty: Difficulty): SavedGame | null {
+  if (!isObj(raw) || raw.v !== SAVE_VERSION || !isObj(raw.puzzle)) return null;
+  const { n, k } = DIFFICULTIES[difficulty];
+  const p = raw.puzzle;
+  if (p.difficulty !== difficulty || p.n !== n || p.k !== k) return null;
+  // Solution: a permutation of houses per category.
+  if (!Array.isArray(p.solution) || p.solution.length !== k) return null;
+  const solution: number[][] = [];
+  for (const row of p.solution) {
+    if (!Array.isArray(row) || row.length !== n || !row.every((h) => isInt(h, 0, n - 1))) return null;
+    if (new Set(row).size !== n) return null;
+    solution.push([...(row as number[])]);
+  }
+  if (!Array.isArray(p.clues) || p.clues.length === 0 || p.clues.length > 200) return null;
+  const clues: Clue[] = [];
+  for (const c of p.clues) {
+    const clue = parseClue(c, n, k);
+    if (!clue || !clueHolds(clue, solution, n)) return null;
+    clues.push(clue);
+  }
+  const check = solve(n, k, clues);
+  if (check.count !== 1 || check.aborted) return null;
+  const rating = isInt(p.rating, 0, Number.MAX_SAFE_INTEGER) ? p.rating : 0;
+  // Player state.
+  const sol = solutionToTable(solution, n, k);
+  if (!Array.isArray(raw.table) || raw.table.length !== n) return null;
+  if (!Array.isArray(raw.locked) || raw.locked.length !== n) return null;
+  const table: Table = [];
+  const locked: boolean[][] = [];
+  for (let h = 0; h < n; h++) {
+    const tr = raw.table[h];
+    const lr = raw.locked[h];
+    if (!Array.isArray(tr) || tr.length !== k || !Array.isArray(lr) || lr.length !== k) return null;
+    const trow: (number | null)[] = [];
+    const lrow: boolean[] = [];
+    for (let c = 0; c < k; c++) {
+      const v = tr[c];
+      if (v !== null && !isInt(v, 0, n - 1)) return null;
+      if (typeof lr[c] !== 'boolean') return null;
+      if (lr[c] && v !== sol[h][c]) return null;
+      trow.push(v as number | null);
+      lrow.push(lr[c] as boolean);
+    }
+    table.push(trow);
+    locked.push(lrow);
+  }
+  // Each item at most once per category.
+  for (let c = 0; c < k; c++) {
+    const seen = new Set<number>();
+    for (let h = 0; h < n; h++) {
+      const v = table[h][c];
+      if (v === null) continue;
+      if (seen.has(v)) return null;
+      seen.add(v);
+    }
+  }
+  if (!Array.isArray(raw.struck) || raw.struck.length !== clues.length || !raw.struck.every((s) => typeof s === 'boolean')) return null;
+  if (!isInt(raw.hints, 0, n * k) || !isInt(raw.failedChecks, 0, 1e6)) return null;
+  if (typeof raw.elapsedMs !== 'number' || !Number.isFinite(raw.elapsedMs) || raw.elapsedMs < 0) return null;
+  return {
+    v: SAVE_VERSION,
+    puzzle: { difficulty, n, k, solution, clues, rating },
+    table,
+    locked,
+    struck: [...(raw.struck as boolean[])],
+    hints: raw.hints,
+    failedChecks: raw.failedChecks,
+    elapsedMs: raw.elapsedMs,
+  };
+}
+
+/** True when the player has done anything worth keeping (a placed cell, a hint, a failed check). */
+export function hasProgress(save: Pick<SavedGame, 'table' | 'hints' | 'failedChecks'>): boolean {
+  return save.hints > 0 || save.failedChecks > 0 || countEmpty(save.table) < save.table.length * (save.table[0]?.length ?? 0);
 }

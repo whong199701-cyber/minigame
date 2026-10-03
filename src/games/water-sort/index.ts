@@ -34,7 +34,12 @@ const RETURN_MS = 150;
 const SHAKE_MS = 320;
 const TILT = 0.95; // radians the pouring tube leans
 const WIN_DELAY_MS = 700;
+/** Win shimmer: a whole number of sweeps, so it ends with the band off the board. */
+const WIN_SWEEP_MS = 900;
+const WIN_SHIMMER_MS = WIN_SWEEP_MS * 3;
 const MAX_PICKER_CHIPS = 100;
+/** Top padding of .ws-picker (style.css); chips are scrolled to sit just below it. */
+const PICKER_PAD = 4;
 
 type Phase = 'start' | 'playing' | 'won';
 
@@ -99,8 +104,17 @@ function create(ctx: GameContext): GameInstance {
   };
   let unlocked = Math.max(1, readInt('unlocked', 1));
   let level = clamp(readInt('level', 1), 1, unlocked);
-  let starsMap = ctx.storage.get<Record<string, number>>('stars', {});
-  if (typeof starsMap !== 'object' || starsMap === null || Array.isArray(starsMap)) starsMap = {};
+  const readMap = (key: string): Record<string, number> => {
+    const v = ctx.storage.get<unknown>(key, {});
+    return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, number>) : {};
+  };
+  const starsMap = readMap('stars');
+  /** Hints spent per level; kept across restarts and cleared when the level is won. */
+  const hintsUsed = readMap('hintsUsed');
+  const hintsLeftFor = (n: number): number => {
+    const used = hintsUsed[String(n)];
+    return clamp(HINTS_PER_LEVEL - (typeof used === 'number' && Number.isFinite(used) ? Math.floor(used) : 0), 0, HINTS_PER_LEVEL);
+  };
 
   // ── Round state ───────────────────────────────────────────────────────
   let phase: Phase = 'start';
@@ -131,6 +145,7 @@ function create(ctx: GameContext): GameInstance {
   let hudHints: HTMLElement | null = null;
   let undoBtn: HTMLButtonElement | null = null;
   let hintBtn: HTMLButtonElement | null = null;
+  let headerOff: (() => void)[] = [];
   let colours = readColours(ctx.theme);
 
   function readColours(theme: ThemeName): Colours {
@@ -149,10 +164,7 @@ function create(ctx: GameContext): GameInstance {
     };
   }
 
-  // ── Header actions & global lifecycle ─────────────────────────────────
-  const removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
-  const removeUndo = ctx.addHeaderAction({ icon: '↶', label: t('undo'), onClick: undo });
-  const removeHint = ctx.addHeaderAction({ icon: '💡', label: t('hint'), onClick: giveHint });
+  // ── Global lifecycle (header actions exist only while a level is on screen) ──
   const onKey = (e: KeyboardEvent): void => {
     if (phase !== 'playing') return;
     if (e.key === 'z' || e.key === 'Z' || e.key === 'Backspace') {
@@ -167,9 +179,6 @@ function create(ctx: GameContext): GameInstance {
   };
   window.addEventListener('keydown', onKey);
   ctx.onDestroy(() => {
-    removeRestart();
-    removeUndo();
-    removeHint();
     window.removeEventListener('keydown', onKey);
     teardownGame();
   });
@@ -216,7 +225,8 @@ function create(ctx: GameContext): GameInstance {
       next.disabled = level >= unlocked;
       for (const [n, chip] of chips) chip.classList.toggle('active', n === level);
       const active = chips.get(level);
-      if (scroll && active) active.scrollIntoView({ block: 'nearest' });
+      // Scroll only the picker (never the page), row-aligned so no half-clipped row shows at the top.
+      if (scroll && active) picker.scrollTop = Math.max(0, active.offsetTop - PICKER_PAD);
       ctx.storage.set('level', level);
     };
     prev.addEventListener('click', () => {
@@ -233,7 +243,7 @@ function create(ctx: GameContext): GameInstance {
     });
     const first = Math.max(1, unlocked - MAX_PICKER_CHIPS + 1);
     for (let n = first; n <= unlocked; n++) {
-      const stars = starsMap[String(n)] ?? 0;
+      const stars = clamp(Math.floor(Number(starsMap[String(n)]) || 0), 0, 3);
       const chip = el(
         'button',
         { class: 'ws-chip' + (isChallengeLevel(n) ? ' challenge' : ''), type: 'button', role: 'option' },
@@ -265,7 +275,7 @@ function create(ctx: GameContext): GameInstance {
           picker,
           bestLine,
           playBtn,
-          unlocked > 1 ? null : el('p', { class: 'muted small', text: t('lockedNote') }),
+          unlocked > 1 ? null : el('p', { class: 'muted small ws-note', text: t('lockedNote') }),
         ),
       ),
     );
@@ -277,11 +287,12 @@ function create(ctx: GameContext): GameInstance {
     teardownGame();
     level = clamp(n, 1, Math.max(unlocked, 1));
     ctx.storage.set('level', level);
-    lvl = generateLevel(level);
+    // Levels are deterministic, so a restart or replay reuses the board instead of re-running the solver.
+    if (!lvl || lvl.level !== level) lvl = generateLevel(level);
     state = lvl.tubes.map((tube) => tube.slice());
     history = [];
     moves = 0;
-    hintsLeft = HINTS_PER_LEVEL;
+    hintsLeft = hintsLeftFor(level);
     selected = -1;
     hintMove = null;
     anim = null;
@@ -293,6 +304,11 @@ function create(ctx: GameContext): GameInstance {
     dirty = true;
 
     root.innerHTML = '';
+    headerOff = [
+      ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart }),
+      ctx.addHeaderAction({ icon: '↶', label: t('undo'), onClick: undo }),
+      ctx.addHeaderAction({ icon: '💡', label: t('hint'), onClick: giveHint }),
+    ];
     const hud = el(
       'div',
       { class: 'game-hud ws-hud' },
@@ -314,7 +330,7 @@ function create(ctx: GameContext): GameInstance {
     offPointer = onPointer(cv.canvas, pointerHandlers());
     loop = createLoop((dt) => {
       update(dt * 1000);
-      if (dirty || anim || hintMove || (winT >= 0 && winT < 3000) || anyTransient()) {
+      if (dirty || anim || hintVisible() || (winT >= 0 && winT < WIN_SHIMMER_MS) || anyTransient()) {
         dirty = false;
         draw();
       }
@@ -324,6 +340,8 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function teardownGame(): void {
+    for (const off of headerOff) off();
+    headerOff = [];
     loop?.stop();
     loop = null;
     offPointer?.();
@@ -432,9 +450,20 @@ function create(ctx: GameContext): GameInstance {
     };
   }
 
+  /** The pour on screen solves the board: input waits for the win instead of cutting it short. */
+  function finalPourPending(): boolean {
+    return anim !== null && isSolved(state);
+  }
+
+  /** The hint ring shows only while the hinted source tube is the one lifted. */
+  function hintVisible(): boolean {
+    return hintMove !== null && selected === hintMove.from;
+  }
+
   function onTap(i: number): void {
-    if (phase !== 'playing') return;
+    if (phase !== 'playing' || finalPourPending()) return;
     if (anim) finishAnim();
+    if (phase !== 'playing') return;
     dirty = true;
     if (i < 0) {
       if (selected >= 0) {
@@ -552,8 +581,9 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function undo(): void {
-    if (phase !== 'playing' || history.length === 0) return;
+    if (phase !== 'playing' || history.length === 0 || finalPourPending()) return;
     if (anim) finishAnim();
+    if (phase !== 'playing' || history.length === 0) return;
     state = history.pop()!;
     moves = Math.max(0, moves - 1);
     selected = -1;
@@ -566,13 +596,14 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function giveHint(): void {
-    if (phase !== 'playing' || !lvl) return;
+    if (phase !== 'playing' || !lvl || finalPourPending()) return;
     if (hintsLeft <= 0) {
       ctx.play('error');
       ctx.toast(t('noHints'));
       return;
     }
     if (anim) finishAnim();
+    if (phase !== 'playing') return;
     const res = solveForPlay(state, { exact: 20000, greedy: 40000 });
     if (res.status === 'unsolvable') {
       ctx.play('error');
@@ -587,6 +618,8 @@ function create(ctx: GameContext): GameInstance {
       return;
     }
     hintsLeft--;
+    hintsUsed[String(level)] = HINTS_PER_LEVEL - hintsLeft;
+    ctx.storage.set('hintsUsed', hintsUsed);
     hintMove = mv;
     hintT = 0;
     selected = mv.from;
@@ -598,19 +631,19 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function onRestart(): void {
-    if (phase !== 'playing') return;
-    if (phase === 'playing' && moves === 0 && history.length === 0) {
-      showStart();
-      return;
-    }
+    if (phase !== 'playing' || finalPourPending()) return;
+    const untouched = moves === 0 && history.length === 0;
+    const replayed = level;
     ctx.showModal({
       title: t('restartTitle'),
-      body: t('restartBody'),
-      buttons: [
-        { label: t('cancel') },
-        { label: t('levels'), onClick: () => showStart() },
-        { label: t('restartLevel'), primary: true, onClick: () => startLevel(level) },
-      ],
+      body: untouched ? t('restartFresh') : t('restartBody'),
+      buttons: untouched
+        ? [{ label: t('cancel') }, { label: t('levels'), primary: true, onClick: () => phase === 'playing' && showStart() }]
+        : [
+            { label: t('cancel') },
+            { label: t('levels'), onClick: () => phase === 'playing' && showStart() },
+            { label: t('restartLevel'), primary: true, onClick: () => phase === 'playing' && startLevel(replayed) },
+          ],
     });
   }
 
@@ -622,7 +655,7 @@ function create(ctx: GameContext): GameInstance {
     winT = 0;
     const par = lvl.par;
     const stars = starsFor(moves, par);
-    const prevStars = starsMap[String(level)] ?? 0;
+    const prevStars = Number(starsMap[String(level)]) || 0;
     if (stars > prevStars) {
       starsMap[String(level)] = stars;
       ctx.storage.set('stars', starsMap);
@@ -631,7 +664,10 @@ function create(ctx: GameContext): GameInstance {
       unlocked = level + 1;
       ctx.storage.set('unlocked', unlocked);
     }
-    const prevBest = ctx.storage.getBest('L' + level);
+    if (String(level) in hintsUsed) {
+      delete hintsUsed[String(level)];
+      ctx.storage.set('hintsUsed', hintsUsed);
+    }
     const isBest = ctx.storage.recordBest('L' + level, moves, 'lower');
     ctx.storage.recordBest('level', level, 'higher');
     ctx.play('win');
@@ -645,7 +681,7 @@ function create(ctx: GameContext): GameInstance {
       starRow,
       el('p', { text: t('resultMoves', { n: moves, p: par }) }),
       stars === 3 ? el('p', { text: t('perfect') }) : null,
-      isBest && prevBest !== null ? el('p', { class: 'ws-new-best', text: '🏆 ' + t('newBest') }) : null,
+      isBest ? el('p', { class: 'ws-new-best', text: '🏆 ' + t('newBest') }) : null,
     );
     clearTimeout(winTimer);
     winTimer = window.setTimeout(() => {
@@ -683,8 +719,11 @@ function create(ctx: GameContext): GameInstance {
       if (shakeT[i] > 0) shakeT[i] = Math.max(0, shakeT[i] - ms);
       if (doneT[i] >= 0) doneT[i] += ms;
     }
-    if (hintMove) hintT += ms;
-    if (winT >= 0) winT += ms;
+    if (hintVisible()) hintT += ms;
+    if (winT >= 0 && winT < WIN_SHIMMER_MS) {
+      winT = Math.min(WIN_SHIMMER_MS, winT + ms);
+      if (winT >= WIN_SHIMMER_MS) dirty = true; // one last frame without the band
+    }
     if (anim) {
       anim.t += ms;
       if (anim.t >= anim.travel + anim.pour + anim.ret) finishAnim();
@@ -724,9 +763,9 @@ function create(ctx: GameContext): GameInstance {
         selected: selected === i,
         complete,
         donePulse: complete && doneT[i] >= 0 ? clamp(1 - doneT[i] / 1200, 0, 1) : 0,
-        win: winT >= 0 ? winT : -1,
+        win: winT >= 0 && winT < WIN_SHIMMER_MS && state[i].length > 0 ? winT : -1,
       });
-      if (hintMove && hintMove.to === i) drawHintRing(g, x, y, r.w, r.h);
+      if (hintMove && hintVisible() && hintMove.to === i) drawHintRing(g, x, y, r.w, r.h);
     }
 
     if (a) {
@@ -857,7 +896,7 @@ function create(ctx: GameContext): GameInstance {
     }
     if (opts.win >= 0) {
       // Gentle shimmer sweep on the finished board.
-      const p = (opts.win / 900) % 1;
+      const p = (opts.win / WIN_SWEEP_MS) % 1;
       g.save();
       tubePath(g, x, y, w, h);
       g.closePath();

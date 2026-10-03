@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BOARDS,
+  BOARD_IDS,
+  COMFORT_TILE_W,
   LAYOUTS,
   LAYOUT_IDS,
   FULL_TILE_COUNT,
   TILE_ASPECT,
   availablePairs,
+  boardFor,
   buildBoard,
   computeMetrics,
   countPairs,
   drawOrder,
+  findClearOrder,
   freeTiles,
   fullBag,
   generateBoard,
@@ -29,6 +34,7 @@ import {
   suitOf,
   tileRect,
   validateLayout,
+  type Pos,
   type Tile,
 } from './logic';
 
@@ -106,7 +112,9 @@ describe('layouts', () => {
     expect(LAYOUTS.small).toHaveLength(72);
     expect(LAYOUTS.medium).toHaveLength(100);
     expect(LAYOUTS.large).toHaveLength(144);
-    for (const id of LAYOUT_IDS) expect(validateLayout(LAYOUTS[id])).toEqual([]);
+    expect(BOARDS.largeClassic).toHaveLength(144);
+    for (const id of BOARD_IDS) expect(validateLayout(BOARDS[id])).toEqual([]);
+    for (const id of LAYOUT_IDS) expect(BOARDS[id]).toBe(LAYOUTS[id]);
   });
 
   it('validateLayout reports problems', () => {
@@ -115,18 +123,88 @@ describe('layouts', () => {
     expect(validateLayout([{ x: 0, y: 0, z: 0 }, { x: 10, y: 0, z: 1 }])).toContain('floating tile at 1');
   });
 
-  it('turtle is 8 tiles wide and 12 tall with 5 layers', () => {
+  it('portrait turtle is 8 tiles wide and 12 tall with 5 layers', () => {
     const b = layoutBounds(LAYOUTS.large);
     expect(b.maxX - b.minX).toBe(16);
     expect(b.maxY - b.minY).toBe(24);
     expect(b.maxZ).toBe(4);
   });
 
-  it('every layout fits a phone with usable tiles', () => {
+  it('classic turtle: 15 × 8 tiles, 87 + 36 + 16 + 4 + 1 tiles on 5 layers', () => {
+    const pos = BOARDS.largeClassic;
+    const b = layoutBounds(pos);
+    expect(b.maxX - b.minX).toBe(30);
+    expect(b.maxY - b.minY).toBe(16);
+    expect(b.maxZ).toBe(4);
+    expect([0, 1, 2, 3, 4].map((z) => pos.filter((p) => p.z === z).length)).toEqual([87, 36, 16, 4, 1]);
+    // base rows of 12 / 8 / 10 / 12 / 12 / 10 / 8 / 12 plus the three half-row end tiles
+    const rowLen = (y: number) => pos.filter((p) => p.z === 0 && p.y === y).length;
+    expect([0, 2, 4, 6, 8, 10, 12, 14].map(rowLen)).toEqual([12, 8, 10, 12, 12, 10, 8, 12]);
+    expect(rowLen(7)).toBe(3);
+    // the crown tile covers all four tiles of the 2 × 2 layer
+    const crown = pos.find((p) => p.z === 4)!;
+    const tiles = pos.map((p, i) => tile(i, p.x, p.y, p.z));
+    for (const t of tiles.filter((t) => t.z === 3)) expect(isCovered(t, tiles)).toBe(true);
+    expect(isFree(tiles.find((t) => t.x === crown.x && t.z === 4)!, tiles)).toBe(true);
+  });
+
+  it('classic turtle blocks along its long rows: few tiles are free at the start', () => {
+    const tiles = BOARDS.largeClassic.map((p, i) => tile(i, p.x, p.y, p.z));
+    const free = freeTiles(tiles);
+    const at = (x: number, y: number, z = 0) => tiles.find((t) => t.x === x && t.y === y && t.z === z)!;
+    // left head tile is free, the row ends next to it are blocked by it
+    expect(free).toContain(at(0, 7));
+    expect(free).not.toContain(at(2, 6));
+    expect(free).not.toContain(at(2, 8));
+    // of the two tail tiles only the outer one is free
+    expect(free).toContain(at(28, 7));
+    expect(free).not.toContain(at(26, 7));
+    // base: 6 plain rows × 2 ends + head + outer tail; 6 × 6 layer: 6 rows × 2; 4 × 4 layer: 4 × 2; crown
+    expect(free).toHaveLength(14 + 12 + 8 + 1);
+    // the portrait re-shaping has more open row ends (12 short rows with gaps) — it is the easier turtle
+    const portrait = LAYOUTS.large.map((p, i) => tile(i, p.x, p.y, p.z));
+    expect(freeTiles(portrait).length).toBeGreaterThan(free.length);
+  });
+
+  it('every layout fits a 390 px phone (iPhone 13 browser viewport) with tappable tiles', () => {
+    // 664 px viewport − 56 px header − 50 px HUD bar
     for (const id of LAYOUT_IDS) {
-      const m = computeMetrics(layoutBounds(LAYOUTS[id]), 390, 556, 6);
+      const m = computeMetrics(layoutBounds(LAYOUTS[id]), 390, 558, 6);
       expect(m.w).toBeGreaterThanOrEqual(36);
+      expect(m.h).toBeGreaterThanOrEqual(43);
     }
+    // standalone PWA (390 × 844): every layout reaches the 44 px touch target in both directions
+    for (const id of LAYOUT_IDS) {
+      const m = computeMetrics(layoutBounds(LAYOUTS[id]), 390, 844 - 56 - 50, 6);
+      expect(m.w).toBeGreaterThanOrEqual(43);
+      expect(m.h).toBeGreaterThanOrEqual(44);
+    }
+  });
+});
+
+describe('board choice per screen shape', () => {
+  const tileW = (id: keyof typeof BOARDS, w: number, h: number) => computeMetrics(layoutBounds(BOARDS[id]), w, h, 6).w;
+
+  it('small and medium modes always use their own board', () => {
+    expect(boardFor('small', 390, 558)).toBe('small');
+    expect(boardFor('medium', 1200, 800)).toBe('medium');
+  });
+
+  it('portrait phones get the portrait turtle, where the classic one would be tiny', () => {
+    expect(boardFor('large', 390, 558)).toBe('large');
+    expect(boardFor('large', 390, 738)).toBe('large');
+    expect(boardFor('large', 320, 462)).toBe('large');
+    expect(tileW('largeClassic', 390, 558)).toBeLessThan(26);
+  });
+
+  it('landscape phones, tablets and desktops get the classic turtle', () => {
+    // 844 × 390 landscape phone: 92 px side HUD, 56 px header
+    expect(boardFor('large', 844 - 92, 390 - 56)).toBe('largeClassic');
+    expect(tileW('largeClassic', 752, 334)).toBeGreaterThan(tileW('large', 752, 334) * 1.4);
+    expect(boardFor('large', 1024, 1366 - 56 - 50)).toBe('largeClassic');
+    expect(tileW('largeClassic', 1024, 1260)).toBeGreaterThanOrEqual(COMFORT_TILE_W);
+    expect(boardFor('large', 1366 - 92, 1024 - 56)).toBe('largeClassic');
+    expect(boardFor('large', 1280 - 92, 800 - 56)).toBe('largeClassic');
   });
 });
 
@@ -217,15 +295,15 @@ describe('pairs and hints', () => {
 });
 
 describe('generation', () => {
-  it('produces solvable boards that replay to empty for every layout', () => {
+  it('produces solvable boards that replay to empty for every board', () => {
     let fails = 0;
-    for (const id of LAYOUT_IDS) {
+    for (const id of BOARD_IDS) {
       for (let seed = 1; seed <= 40; seed++) {
         const r = rng(seed * 7919 + id.length);
-        const board = generateBoard(LAYOUTS[id], r);
-        expect(board.tiles).toHaveLength(LAYOUTS[id].length);
+        const board = generateBoard(BOARDS[id], r);
+        expect(board.tiles).toHaveLength(BOARDS[id].length);
         expect(board.tiles.every((t) => t.kind >= 0 && t.kind < 42)).toBe(true);
-        expect(board.solution).toHaveLength(LAYOUTS[id].length / 2);
+        expect(board.solution).toHaveLength(BOARDS[id].length / 2);
         expect(replaySolver(board.tiles, board.solution)).toBe(true);
         // the first move of the solution is actually available to the player
         expect(countPairs(board.tiles)).toBeGreaterThan(0);
@@ -235,16 +313,21 @@ describe('generation', () => {
     expect(fails).toBe(0);
   });
 
-  it('reverse fill rarely needs a retry', () => {
-    let ok = 0;
-    const N = 60;
-    for (let seed = 1; seed <= N; seed++) {
-      const r = rng(seed);
-      const bag = fullBag(r).slice(0, 72);
-      if (buildBoard(LAYOUTS.large, bag, r, 1)) ok++;
+  it('reverse fill rarely needs many retries', () => {
+    for (const [pos, minRate] of [
+      [LAYOUTS.large, 0.6],
+      [BOARDS.largeClassic, 0.35],
+    ] as const) {
+      let ok = 0;
+      const N = 60;
+      for (let seed = 1; seed <= N; seed++) {
+        const r = rng(seed);
+        const bag = fullBag(r).slice(0, 72);
+        if (buildBoard(pos, bag, r, 1)) ok++;
+      }
+      // Single attempts succeed often (classic turtle ~50 %); the generator retries up to 200 times anyway.
+      expect(ok / N).toBeGreaterThan(minRate);
     }
-    // At least 60 % of single attempts succeed; the generator retries up to 200 times anyway.
-    expect(ok / N).toBeGreaterThan(0.6);
   });
 
   it('keeps tile multiset from the bag (4 of a regular kind at most)', () => {
@@ -255,11 +338,21 @@ describe('generation', () => {
   });
 
   it('replaySolver rejects wrong orders', () => {
+    // two stacked pairs: the top pair must go first
+    const stack = [tile(0, 0, 0, 0, 1), tile(1, 4, 0, 0, 1), tile(2, 0, 0, 1, 2), tile(3, 4, 0, 1, 2)];
+    expect(replaySolver(stack, [[2, 3], [0, 1]])).toBe(true);
+    expect(replaySolver(stack, [[0, 1], [2, 3]])).toBe(false);
+    // an incomplete order leaves tiles behind
+    expect(replaySolver(stack, [[2, 3]])).toBe(false);
+    expect(replaySolver(stack, [])).toBe(false);
+
     const board = generateBoard(LAYOUTS.small, rng(5));
+    // reversed, the first pair is the one the generator buried first: covered by the upper layers
     const reversed = board.solution.slice().reverse();
-    // The last pair of the solution is usually buried at the start; a fully reversed order must fail
-    // unless the board happens to be trivially symmetric — check it against a simple invariant instead.
-    expect(replaySolver(board.tiles, reversed) && replaySolver(board.tiles, [])).toBe(false);
+    const [ra, rb] = reversed[0];
+    const covered = (id: number) => isCovered(board.tiles.find((t) => t.id === id)!, board.tiles);
+    expect(covered(ra) || covered(rb) || !isFree(board.tiles.find((t) => t.id === ra)!, board.tiles)).toBe(true);
+    expect(replaySolver(board.tiles, reversed)).toBe(false);
     expect(replaySolver(board.tiles, [[0, 0]])).toBe(false);
     expect(replaySolver(board.tiles, [[0, 9999]])).toBe(false);
     const mismatched = board.solution.map(([a, b], i) => (i === 0 ? ([a, board.solution[1][0]] as [number, number]) : ([a, b] as [number, number])));
@@ -286,7 +379,8 @@ describe('reshuffle', () => {
     let tiles = board.tiles.slice();
     for (const [a, b] of board.solution.slice(0, 20)) tiles = tiles.filter((t) => t.id !== a && t.id !== b);
     const before = tiles.map((t) => t.kind).sort((x, y) => x - y);
-    const res = reshuffle(tiles, r);
+    const res = reshuffle(tiles, r)!;
+    expect(res).not.toBeNull();
     expect(res.tiles).toHaveLength(tiles.length);
     expect(res.tiles.map((t) => t.kind).sort((x, y) => x - y)).toEqual(before);
     expect(res.tiles.map((t) => t.id).sort((x, y) => x - y)).toEqual(tiles.map((t) => t.id).sort((x, y) => x - y));
@@ -301,6 +395,83 @@ describe('reshuffle', () => {
 
   it('handles an empty board', () => {
     expect(reshuffle([])).toEqual({ tiles: [], solution: [] });
+  });
+
+  it('returns null (nothing to charge) when no re-deal can clear the remaining positions', () => {
+    // last two tiles stacked on each other
+    expect(reshuffle([tile(0, 0, 0, 0, 5), tile(1, 0, 0, 1, 7)], rng(1))).toBeNull();
+    // a four-tile tower
+    const tower = [tile(0, 0, 0, 0, 5), tile(1, 0, 0, 1, 5), tile(2, 0, 0, 2, 7), tile(3, 0, 0, 3, 7)];
+    expect(reshuffle(tower, rng(2))).toBeNull();
+    // three in a row with one stacked on the middle: only the two ends are ever free together
+    const t3 = [tile(0, 0, 0, 0, 1), tile(1, 2, 0, 0, 1), tile(2, 4, 0, 0, 2), tile(3, 2, 0, 1, 2)];
+    expect(reshuffle(t3, rng(3))).not.toBeNull();
+    // kinds that cannot be paired
+    expect(reshuffle([tile(0, 0, 0, 0, 5), tile(1, 4, 0, 0, 6)], rng(4))).toBeNull();
+  });
+
+  it('re-deals small leftovers exactly (no random give-up) and keeps them solvable', () => {
+    // a 2-high stack next to a lone tile and a second stack: solvable only top-first
+    const left: Tile[] = [
+      tile(10, 0, 0, 0, 3),
+      tile(11, 0, 0, 1, 3),
+      tile(12, 4, 0, 0, 9),
+      tile(13, 4, 0, 1, 9),
+    ];
+    for (let seed = 1; seed <= 20; seed++) {
+      const res = reshuffle(left, rng(seed));
+      expect(res).not.toBeNull();
+      expect(replaySolver(res!.tiles, res!.solution)).toBe(true);
+      expect(res!.tiles.map((t) => t.id)).toEqual([10, 11, 12, 13]);
+    }
+  });
+
+  it('a dead end left by random play on a generated board is re-dealt or proven hopeless', () => {
+    for (let seed = 1; seed <= 25; seed++) {
+      const r = rng(seed * 31);
+      let tiles = generateBoard(BOARDS.largeClassic, r).tiles;
+      // greedy random play until stuck
+      for (;;) {
+        const free = freeTiles(tiles);
+        const options: [Tile, Tile][] = [];
+        for (let i = 0; i < free.length; i++) for (let j = i + 1; j < free.length; j++) if (matchGroup(free[i].kind) === matchGroup(free[j].kind)) options.push([free[i], free[j]]);
+        if (!options.length) break;
+        const [a, b] = options[Math.floor(r() * options.length)];
+        tiles = tiles.filter((t) => t !== a && t !== b);
+      }
+      if (!tiles.length) continue;
+      const res = reshuffle(tiles, r);
+      const positions: Pos[] = tiles.map((t) => ({ x: t.x, y: t.y, z: t.z }));
+      if (res) {
+        expect(replaySolver(res.tiles, res.solution)).toBe(true);
+        expect(countPairs(res.tiles)).toBeGreaterThan(0);
+      } else {
+        // only allowed when the positions really cannot be emptied in any order
+        expect(findClearOrder(positions, 500000)).toBeNull();
+      }
+    }
+  });
+});
+
+describe('exact clear-order search', () => {
+  it('finds an order for clearable positions and proves impossible ones', () => {
+    const row = [tile(0, 0, 0, 0), tile(1, 2, 0, 0), tile(2, 4, 0, 0), tile(3, 6, 0, 0)];
+    const order = findClearOrder(row)!;
+    expect(order).toHaveLength(2);
+    // replaying the order with matching kinds per pair clears the row
+    const kinds = new Map<number, number>();
+    order.forEach(([a, b], k) => {
+      kinds.set(a, k);
+      kinds.set(b, k);
+    });
+    expect(replaySolver(row.map((t) => ({ ...t, kind: kinds.get(t.id)! })), order)).toBe(true);
+    expect(findClearOrder([{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }])).toBeNull();
+    expect(findClearOrder([{ x: 0, y: 0, z: 0 }])).toBeNull();
+    expect(findClearOrder([])).toEqual([]);
+  });
+
+  it('reports an exhausted budget as undecided rather than impossible', () => {
+    expect(findClearOrder(BOARDS.largeClassic, 5)).toBeUndefined();
   });
 });
 
@@ -379,5 +550,21 @@ describe('geometry and hit testing', () => {
     const rm = tileRect(mid, m);
     // just above the blocked middle tile: no snap (middle is not free, free tiles are too far)
     expect(hitTestTolerant([l, mid, r], rm.x + rm.w / 2, rm.y - 3, m)).toBeNull();
+  });
+
+  it('a tap on the edge of a blocked tile next to a free one picks the free tile', () => {
+    const m = computeMetrics({ minX: 0, maxX: 6, minY: 0, maxY: 2, maxZ: 0 }, 400, 300);
+    const l = tile(0, 0, 0, 0);
+    const mid = tile(1, 2, 0, 0);
+    const r = tile(2, 4, 0, 0);
+    const rm = tileRect(mid, m);
+    // 3 px inside the blocked middle tile, right next to the free left tile
+    expect(hitTest([l, mid, r], rm.x + 3, rm.y + rm.h / 2, m)).toBe(mid);
+    expect(hitTestTolerant([l, mid, r], rm.x + 3, rm.y + rm.h / 2, m)).toBe(l);
+    // well inside the blocked tile: still the blocked tile (so the player sees why it does not move)
+    expect(hitTestTolerant([l, mid, r], rm.x + rm.w / 2, rm.y + rm.h / 2, m)).toBe(mid);
+    // a free tile hit exactly is never replaced
+    const rl = tileRect(l, m);
+    expect(hitTestTolerant([l, mid, r], rl.x + rl.w - 2, rl.y + 5, m)).toBe(l);
   });
 });

@@ -1,50 +1,44 @@
 import type { GameContext, GameInstance, GameModule, ThemeName } from '../../app/types';
 import { el, button, segmented, formatTime } from '../../app/ui';
-import { createCanvas, createLoop, onPointer, type CanvasHandle } from '../../app/canvas';
+import { createCanvas, onPointer, type CanvasHandle } from '../../app/canvas';
 import { strings } from './strings';
 import {
+  CLEAR_DUR,
   COMBO_WINDOW,
   MODES,
   MODE_LIST,
   SIDES,
   cellKey,
-  clearScore,
   comboMultiplier,
   computeBoard,
-  createSim,
-  fallSpeed,
-  findGroups,
+  coreRotate,
+  coreTick,
+  createCore,
+  gestureEnd,
+  gestureMove,
+  gestureStart,
   isMode,
-  levelFor,
   localSide,
-  nextCombo,
-  overflowSides,
-  pickColor,
-  pickLane,
-  removeCells,
   spawnDistance,
-  spawnInterval,
-  stepFalling,
   type Board,
-  type Cell,
-  type Landed,
+  type ClearCell,
+  type ClearGroup,
+  type Core,
+  type CoreEvents,
+  type Gesture,
   type Mode,
-  type SimState,
 } from './logic';
 import './style.css';
 
 const DEG = Math.PI / 180;
 const TAN30 = Math.tan(Math.PI / 6);
 const COS30 = Math.cos(Math.PI / 6);
-/** Seconds a cleared group flashes before it is removed. */
-const CLEAR_DUR = 0.32;
 /** Exponential easing rate of the visual rotation (higher = snappier). */
 const ROT_EASE = 16;
-/** Horizontal drag (CSS px) that turns a tap into a swipe, and per extra step. */
-const SWIPE_START = 22;
-const SWIPE_STEP = 64;
 const LAND_FLASH = 0.22;
 const LEVEL_FLASH = 0.9;
+/** Seconds of screen shake at game over. */
+const OVER_SHAKE = 0.5;
 const MAX_PARTICLES = 180;
 const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Noto Sans SC', sans-serif";
 
@@ -52,6 +46,11 @@ const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang S
 const PALETTES: Record<ThemeName, string[]> = {
   dark: ['#ff5c7a', '#ffb13b', '#3ddc97', '#4f8cff', '#c46bff'],
   light: ['#e32e55', '#f08a00', '#1aa364', '#2f63f5', '#8e3fe0'],
+};
+/** Ink for the per-colour symbols (dark on the bright dark-theme blocks, white on the deeper light ones). */
+const GLYPH_INK: Record<ThemeName, string> = {
+  dark: 'rgba(12,16,26,0.55)',
+  light: 'rgba(255,255,255,0.88)',
 };
 
 interface Theme {
@@ -65,6 +64,7 @@ interface Theme {
   danger: string;
   warning: string;
   blocks: string[];
+  glyph: string;
 }
 
 function readTheme(ctx: GameContext, name: ThemeName): Theme {
@@ -81,6 +81,7 @@ function readTheme(ctx: GameContext, name: ThemeName): Theme {
     danger: v('--danger', dark ? '#ff5470' : '#e0304f'),
     warning: v('--warning', dark ? '#ffc857' : '#d9960a'),
     blocks: PALETTES[name],
+    glyph: GLYPH_INK[name],
   };
 }
 
@@ -90,6 +91,11 @@ function rgba(hex: string, a: number): string {
   if (!m) return hex;
   const n = parseInt(m[1], 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+/** True while any shell modal (rules, confirm, results) is up or opening. */
+function modalOpen(): boolean {
+  return document.querySelector('.modal-backdrop:not(.closing)') !== null;
 }
 
 interface Particle {
@@ -112,39 +118,18 @@ interface FloatText {
   size: number;
 }
 
-interface Clearing {
-  cells: Map<string, Cell & { color: number }>;
-  t: number;
-}
-
 type Phase = 'start' | 'ready' | 'playing' | 'paused' | 'over';
-
-interface Drag {
-  x0: number;
-  rotBefore: number;
-  tapDir: number;
-}
 
 function create(ctx: GameContext): GameInstance {
   const { root, t } = ctx;
   const savedMode = ctx.storage.get<string>('mode', 'medium');
   let mode: Mode = isMode(savedMode) ? savedMode : 'medium';
-  let cfg = MODES[mode];
   let themeName: ThemeName = ctx.theme;
   let theme = readTheme(ctx, themeName);
   let phase: Phase = 'start';
 
-  // ── Live game state ───────────────────────────────────────────────────
-  let sim: SimState = createSim();
-  let score = 0;
-  let level = 1;
-  let elapsed = 0;
-  let combo = 0;
-  let lastClearAt = -999;
-  let spawnT = 0;
-  let lastLane = -1;
-  let nextId = 1;
-  let clearing: Clearing | null = null;
+  // ── Live game state (rules live in the pure core; the rest is presentation) ──
+  let core: Core = createCore(MODES[mode]);
   let visualRot = 0; // degrees
   let overT = 0;
   let overSides: number[] = [];
@@ -156,12 +141,13 @@ function create(ctx: GameContext): GameInstance {
   let chevR = 0;
   let lastStatusSec = -1;
   let lastMoveSound = 0;
-  let drag: Drag | null = null;
+  const gestures = new Map<number, Gesture>();
   let overTimer = 0;
   let animT = 0;
 
   let cv: CanvasHandle | null = null;
-  let loop: ReturnType<typeof createLoop> | null = null;
+  let raf = 0;
+  let lastFrame = 0;
   let offPointer: (() => void) | null = null;
   let overlay: HTMLElement | null = null;
   let overlayTitle: HTMLElement | null = null;
@@ -172,21 +158,34 @@ function create(ctx: GameContext): GameInstance {
   let L: Board = { cx: 0, cy: 0, R: 100, a0: 30, lvl: 8 };
 
   // ── Header / global wiring ────────────────────────────────────────────
-  const removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
-  const removePause = ctx.addHeaderAction({ icon: '⏸', label: t('pause'), onClick: togglePause });
+  // Header buttons exist only while a round is running: ↻ restarts the same mode, ⏸/▶ pauses/resumes.
+  let headerKey = '';
+  let headerOff: (() => void)[] = [];
+  function syncHeader(): void {
+    const key = phase === 'playing' ? 'playing' : phase === 'paused' ? 'paused' : '';
+    if (key === headerKey) return;
+    headerKey = key;
+    headerOff.forEach((off) => off());
+    headerOff = [];
+    if (!key) return;
+    headerOff.push(ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart }));
+    headerOff.push(
+      key === 'playing'
+        ? ctx.addHeaderAction({ icon: '⏸', label: t('pause'), onClick: pauseGame })
+        : ctx.addHeaderAction({ icon: '▶', label: t('resume'), onClick: resumeGame }),
+    );
+  }
 
   const onKey = (e: KeyboardEvent): void => {
-    if (document.querySelector('.modal-backdrop.open')) return;
+    if (modalOpen()) return;
     if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
       if (phase === 'playing') {
-        setRotation(sim.rotation - 1);
-        chevL = 1;
+        rotate(-1);
         e.preventDefault();
       }
     } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
       if (phase === 'playing') {
-        setRotation(sim.rotation + 1);
-        chevR = 1;
+        rotate(1);
         e.preventDefault();
       }
     } else if (e.key === ' ' || e.key === 'Enter') {
@@ -204,17 +203,17 @@ function create(ctx: GameContext): GameInstance {
   window.addEventListener('keydown', onKey);
 
   ctx.onDestroy(() => {
-    removeRestart();
-    removePause();
     window.removeEventListener('keydown', onKey);
     teardownGame();
+    headerOff.forEach((off) => off());
+    headerOff = [];
   });
   ctx.onVisibility((visible) => {
     if (!visible) {
       if (phase === 'playing') pauseGame();
-      loop?.stop();
-    } else if (cv) {
-      loop?.start();
+      sleep();
+    } else {
+      wake();
     }
   });
   ctx.onThemeChange((name) => {
@@ -227,10 +226,46 @@ function create(ctx: GameContext): GameInstance {
     return el('div', { class: 'hx-icon-wrap ' + cls }, el('div', { class: 'hx-icon' }));
   }
 
+  // ── Frame loop: runs while playing or while an effect is still animating, then sleeps ──
+  function wake(): void {
+    if (raf || !cv) return;
+    lastFrame = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function sleep(): void {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+  }
+
+  function frame(now: number): void {
+    raf = 0;
+    const dt = Math.min(0.05, Math.max(0, (now - lastFrame) / 1000));
+    lastFrame = now;
+    update(dt);
+    drawFrame();
+    if (cv && (phase === 'playing' || !settled())) raf = requestAnimationFrame(frame);
+  }
+
+  /** Nothing left to animate: the board is a still picture until the next input, resize or theme change. */
+  function settled(): boolean {
+    return (
+      visualRot === core.sim.rotation * 60 &&
+      chevL === 0 &&
+      chevR === 0 &&
+      levelFlash === 0 &&
+      landFlash.size === 0 &&
+      particles.length === 0 &&
+      floats.length === 0 &&
+      !(phase === 'over' && overT < OVER_SHAKE)
+    );
+  }
+
   // ── Start screen ──────────────────────────────────────────────────────
   function showStart(): void {
     teardownGame();
     phase = 'start';
+    syncHeader();
     root.innerHTML = '';
     ctx.setStatus('');
     const modeDesc = el('p', { class: 'muted small hx-mode-desc', text: t(mode + 'Desc') });
@@ -252,7 +287,6 @@ function create(ctx: GameContext): GameInstance {
           mode,
           (m) => {
             mode = m;
-            cfg = MODES[m];
             ctx.storage.set('mode', m);
             modeDesc.textContent = t(m + 'Desc');
             updateBest();
@@ -268,8 +302,7 @@ function create(ctx: GameContext): GameInstance {
 
   // ── Game setup / teardown ─────────────────────────────────────────────
   function teardownGame(): void {
-    loop?.stop();
-    loop = null;
+    sleep();
     offPointer?.();
     offPointer = null;
     cv?.destroy();
@@ -278,21 +311,11 @@ function create(ctx: GameContext): GameInstance {
     overTimer = 0;
     overlay = overlayTitle = overlayHint = null;
     hudScore = hudLevel = hudBest = null;
-    drag = null;
+    gestures.clear();
   }
 
   function resetState(): void {
-    cfg = MODES[mode];
-    sim = createSim();
-    score = 0;
-    level = 1;
-    elapsed = 0;
-    combo = 0;
-    lastClearAt = -999;
-    spawnT = 0.4;
-    lastLane = -1;
-    nextId = 1;
-    clearing = null;
+    core = createCore(MODES[mode]);
     visualRot = 0;
     overT = 0;
     overSides = [];
@@ -302,7 +325,7 @@ function create(ctx: GameContext): GameInstance {
     levelFlash = 0;
     chevL = chevR = 0;
     lastStatusSec = -1;
-    drag = null;
+    gestures.clear();
     animT = 0;
   }
 
@@ -324,7 +347,9 @@ function create(ctx: GameContext): GameInstance {
     const area = el('div', { class: 'game-area hx-area' });
     overlayTitle = el('h2', { text: t('tapToStart') });
     overlayHint = el('p', { text: t('controlsHint') });
-    overlay = el('div', { class: 'overlay hx-overlay' }, hexIcon('hx-icon-overlay'), overlayTitle, overlayHint);
+    const modesBtn = button(t('modes'), onModes, { variant: 'secondary', size: 'md', class: 'hx-overlay-btn' });
+    modesBtn.addEventListener('click', (e) => e.stopPropagation());
+    overlay = el('div', { class: 'overlay hx-overlay' }, hexIcon('hx-icon-overlay'), overlayTitle, overlayHint, modesBtn);
     overlay.addEventListener('click', () => {
       if (phase === 'ready') begin();
       else if (phase === 'paused') resumeGame();
@@ -337,45 +362,40 @@ function create(ctx: GameContext): GameInstance {
     });
     area.append(overlay);
     computeLayout(cv.width, cv.height);
+    // A touch rotates only once it is known to be a tap (on release) or a swipe (after a short drag),
+    // so a swipe never turns the hexagon the wrong way first.
     offPointer = onPointer(cv.canvas, {
       down(p) {
         if (phase !== 'playing' || !cv) return;
-        const tapDir = p.x < cv.width / 2 ? -1 : 1;
-        drag = { x0: p.x, rotBefore: sim.rotation, tapDir };
-        setRotation(sim.rotation + tapDir);
-        if (tapDir < 0) chevL = 1;
-        else chevR = 1;
+        gestures.set(p.id, gestureStart(p.x, p.y, cv.width));
       },
       move(p) {
-        if (!drag || phase !== 'playing') return;
-        const dx = p.x - drag.x0;
-        const adx = Math.abs(dx);
-        const steps = adx < SWIPE_START ? 0 : Math.sign(dx) * (1 + Math.floor((adx - SWIPE_START) / SWIPE_STEP));
-        const desired = drag.rotBefore + (steps === 0 ? drag.tapDir : steps);
-        if (desired !== sim.rotation) {
-          setRotation(desired);
-          if (steps < 0) chevL = 1;
-          else if (steps > 0) chevR = 1;
-        }
+        const g = gestures.get(p.id);
+        if (!g || phase !== 'playing') return;
+        rotate(gestureMove(g, p.x, p.y));
       },
-      up() {
-        drag = null;
+      up(p) {
+        const g = gestures.get(p.id);
+        gestures.delete(p.id);
+        if (!g || phase !== 'playing') return;
+        rotate(gestureEnd(g, p.x, p.y));
       },
-    });
-    loop = createLoop((dt) => {
-      update(dt);
-      drawFrame();
+      cancel(p) {
+        gestures.delete(p.id);
+      },
     });
     phase = 'ready';
     updateHud();
     updateStatus(true);
     if (immediate) begin();
     else showOverlay(t('tapToStart'), t('controlsHint'));
-    loop.start();
+    syncHeader();
+    drawFrame();
+    wake();
   }
 
   function computeLayout(w: number, h: number): void {
-    L = computeBoard(w, h, cfg);
+    L = computeBoard(w, h, core.cfg);
   }
 
   function showOverlay(title: string, hint: string): void {
@@ -394,92 +414,82 @@ function create(ctx: GameContext): GameInstance {
     if (phase !== 'ready') return;
     phase = 'playing';
     hideOverlay();
+    syncHeader();
     ctx.play('swoosh');
     ctx.haptic('light');
+    wake();
   }
 
   function pauseGame(): void {
     if (phase !== 'playing') return;
     phase = 'paused';
-    drag = null;
+    gestures.clear();
     showOverlay(t('paused'), t('tapToResume'));
+    syncHeader();
+    // The loop finishes any running effect, then sleeps (see frame()).
   }
 
   function resumeGame(): void {
-    if (phase !== 'paused') return;
+    if (phase !== 'paused' || modalOpen()) return;
     phase = 'playing';
     hideOverlay();
+    syncHeader();
     ctx.play('tap');
-    loop?.start();
+    wake();
   }
 
-  function togglePause(): void {
-    if (phase === 'playing') pauseGame();
-    else if (phase === 'paused') resumeGame();
-  }
-
+  /** ↻: start a fresh round of the same mode (after confirming, since progress is lost). */
   function onRestart(): void {
-    if (phase === 'start') return;
-    if (phase === 'over' || phase === 'ready') {
-      showStart();
-      return;
-    }
-    if (phase === 'playing') pauseGame();
+    if (phase !== 'playing' && phase !== 'paused') return;
+    pauseGame();
     ctx.showModal({
       title: t('restart'),
-      body: t('quitConfirm'),
-      buttons: [{ label: t('cancel') }, { label: t('confirm'), primary: true, onClick: () => showStart() }],
+      body: t('restartConfirm'),
+      buttons: [{ label: t('cancel') }, { label: t('restart'), primary: true, onClick: () => startGame(true) }],
     });
   }
 
-  // ── Simulation ────────────────────────────────────────────────────────
-  function setRotation(r: number): void {
-    if (r === sim.rotation) return;
-    sim.rotation = r;
+  /** Overlay "Modes" button: back to the difficulty picker (confirming first when a round is under way). */
+  function onModes(): void {
+    if (phase === 'ready') {
+      showStart();
+    } else if (phase === 'paused') {
+      ctx.showModal({
+        title: t('modes'),
+        body: t('quitConfirm'),
+        buttons: [{ label: t('cancel') }, { label: t('confirm'), primary: true, onClick: () => showStart() }],
+      });
+    }
+  }
+
+  // ── Simulation glue ───────────────────────────────────────────────────
+  function rotate(steps: number): void {
+    if (!steps || phase !== 'playing') return;
     const now = performance.now();
     if (now - lastMoveSound > 70) {
       ctx.play('move');
       lastMoveSound = now;
     }
-    // A taller stack may now sit under a low block: land it right away.
-    const landed = stepFalling(sim, 0, 0);
-    if (landed.length) onLanded(landed);
-  }
-
-  function spawn(): boolean {
-    const dist = spawnDistance(cfg);
-    const lane = pickLane(sim.falling, dist, lastLane, Math.random);
-    if (lane < 0) return false;
-    const color = pickColor(sim.stacks, cfg.colors, Math.random);
-    sim.falling.push({ id: nextId++, lane, pos: dist, color });
-    lastLane = lane;
-    return true;
+    if (steps < 0) chevL = 1;
+    else chevR = 1;
+    handleEvents(coreRotate(core, steps));
+    wake();
   }
 
   function update(dt: number): void {
     animT += dt;
     if (phase === 'playing') {
-      elapsed += dt;
-      const nl = levelFor(elapsed, score);
-      if (nl !== level) {
-        level = nl;
-        onLevelUp();
+      // A shell modal (e.g. the "?" rules sheet) covers the board: pause so the round is not lost unseen.
+      if (modalOpen()) pauseGame();
+      else {
+        handleEvents(coreTick(core, dt, Math.random));
+        updateStatus(false);
       }
-      spawnT -= dt;
-      if (spawnT <= 0) spawnT = spawn() ? spawnT + spawnInterval(cfg, level) : 0.12;
-      const landed = stepFalling(sim, dt, fallSpeed(cfg, level));
-      if (landed.length) onLanded(landed);
-      if (clearing) {
-        clearing.t += dt;
-        if (clearing.t >= CLEAR_DUR) finishClearing();
-      }
-      updateStatus(false);
     } else if (phase === 'over') {
       overT += dt;
-      if (overT > 1.6 && particles.length === 0 && floats.length === 0) loop?.stop();
     }
-    // Visual easing and effects run in every phase so pauses still look alive.
-    const target = sim.rotation * 60;
+    // Visual easing and effects keep running after a pause until they settle.
+    const target = core.sim.rotation * 60;
     const diff = target - visualRot;
     visualRot = Math.abs(diff) < 0.02 ? target : visualRot + diff * (1 - Math.exp(-ROT_EASE * dt));
     chevL = Math.max(0, chevL - dt * 4);
@@ -515,53 +525,49 @@ function create(ctx: GameContext): GameInstance {
     }
   }
 
+  /** Turn core events into sound, haptics and effects. Order matches the core: removals before the cascade they cause. */
+  function handleEvents(ev: CoreEvents): void {
+    if (ev.levelUp) onLevelUp();
+    if (ev.landed.length) {
+      ctx.play('place');
+      for (const l of ev.landed) landFlash.set(cellKey(l.side, l.level), LAND_FLASH);
+    }
+    if (ev.removed.length) onRemoved(ev.removed);
+    if (ev.cleared.length) onCleared(ev.cleared);
+    if (ev.over) gameOver(ev.over);
+  }
+
   function onLevelUp(): void {
     ctx.play('success');
     ctx.haptic('light');
     levelFlash = LEVEL_FLASH;
-    if (hudLevel) hudLevel.textContent = String(level);
-    floats.push({ x: L.cx, y: bannerY(), text: t('levelUp', { n: level }), life: 1.3, max: 1.3, color: theme.accent, size: 18 });
+    if (hudLevel) hudLevel.textContent = String(core.level);
+    floats.push({ x: L.cx, y: bannerY(), text: t('levelUp', { n: core.level }), life: 1.3, max: 1.3, color: theme.accent, size: 18 });
     updateStatus(true);
   }
 
-  function onLanded(landed: Landed[]): void {
-    ctx.play('place');
-    for (const l of landed) landFlash.set(cellKey(l.side, l.level), LAND_FLASH);
-    const ignore = clearing ? new Set(clearing.cells.keys()) : undefined;
-    const groups = findGroups(sim.stacks, ignore);
-    if (groups.length) startClearing(groups);
-    else if (!clearing) checkOverflow();
-  }
-
-  function startClearing(groups: Cell[][]): void {
-    combo = nextCombo(combo, elapsed - lastClearAt);
-    lastClearAt = elapsed;
-    if (!clearing) clearing = { cells: new Map(), t: 0 };
-    let total = 0;
+  function onCleared(groups: ClearGroup[]): void {
+    let topCombo = 0;
     for (const g of groups) {
-      const pts = clearScore(g.length, combo);
-      total += pts;
+      topCombo = Math.max(topCombo, g.combo);
       let sx = 0;
       let sy = 0;
-      for (const c of g) {
-        clearing.cells.set(cellKey(c.side, c.level), { ...c, color: sim.stacks[c.side][c.level] });
+      for (const c of g.cells) {
         const p = cellCentre(c.side, c.level);
         sx += p.x;
         sy += p.y;
       }
-      floats.push({ x: sx / g.length, y: sy / g.length, text: '+' + pts, life: 1, max: 1, color: theme.text, size: g.length >= 5 ? 21 : 17 });
+      const n = g.cells.length;
+      floats.push({ x: sx / n, y: sy / n, text: '+' + g.points, life: 1, max: 1, color: theme.text, size: n >= 5 ? 21 : 17 });
     }
-    score += total;
-    if (hudScore) hudScore.textContent = String(score);
+    if (hudScore) hudScore.textContent = String(core.score);
     const best = ctx.storage.getBest(mode) ?? 0;
-    if (hudBest && score > best) hudBest.textContent = String(score);
-    ctx.play(combo >= 3 ? 'coin' : 'pop');
-    ctx.haptic(combo >= 3 ? 'medium' : 'light');
+    if (hudBest && core.score > best) hudBest.textContent = String(core.score);
+    ctx.play(topCombo >= 3 ? 'coin' : 'pop');
+    ctx.haptic(topCombo >= 3 ? 'medium' : 'light');
   }
 
-  function finishClearing(): void {
-    if (!clearing) return;
-    const cells = [...clearing.cells.values()];
+  function onRemoved(cells: ClearCell[]): void {
     for (const c of cells) {
       const p = cellCentre(c.side, c.level);
       const color = theme.blocks[c.color % theme.blocks.length];
@@ -571,17 +577,8 @@ function create(ctx: GameContext): GameInstance {
         particles.push({ x: p.x, y: p.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - 40, life: 0.45 + Math.random() * 0.3, color, size: 3 + Math.random() * 3 });
       }
     }
-    sim.stacks = removeCells(sim.stacks, cells);
-    clearing = null;
+    // Blocks above the removed cells dropped, so per-cell landing flashes no longer line up.
     landFlash.clear();
-    const groups = findGroups(sim.stacks);
-    if (groups.length) startClearing(groups);
-    else checkOverflow();
-  }
-
-  function checkOverflow(): void {
-    const over = overflowSides(sim.stacks, cfg.maxLevels);
-    if (over.length) gameOver(over);
   }
 
   function gameOver(sides: number[]): void {
@@ -589,15 +586,20 @@ function create(ctx: GameContext): GameInstance {
     phase = 'over';
     overT = 0;
     overSides = sides;
-    drag = null;
+    gestures.clear();
     hideOverlay();
+    syncHeader();
     ctx.play('lose');
     ctx.haptic('heavy');
     floats.push({ x: L.cx, y: bannerY(), text: t('overflow'), life: 1.5, max: 1.5, color: theme.danger, size: 22 });
-    const isBest = ctx.storage.recordBest(mode, score, 'higher');
-    const best = ctx.storage.getBest(mode) ?? score;
-    if (hudBest) hudBest.textContent = String(best);
+    const score = core.score;
+    // A round that scored nothing is not a record (the start screen keeps saying "No record yet").
+    const isBest = score > 0 && ctx.storage.recordBest(mode, score, 'higher');
+    const best = ctx.storage.getBest(mode);
+    if (hudBest) hudBest.textContent = String(best ?? 0);
     updateStatus(true);
+    const level = core.level;
+    const elapsed = core.elapsed;
     overTimer = window.setTimeout(() => {
       overTimer = 0;
       const body = el(
@@ -606,8 +608,8 @@ function create(ctx: GameContext): GameInstance {
         el('div', { class: 'hx-result-label muted small', text: t('score') }),
         el('div', { class: 'hx-result-score', text: String(score) }),
         el('p', { class: 'muted', text: t('reached', { n: level, t: formatTime(elapsed) }) }),
-        el('p', { class: 'muted', text: t('bestLine', { n: best }) }),
-        isBest && score > 0 ? el('p', { class: 'hx-result-best', text: '🏆 ' + t('newBest') }) : null,
+        el('p', { class: 'muted', text: best === null ? t('noBest') : t('bestLine', { n: best }) }),
+        isBest ? el('p', { class: 'hx-result-best', text: '🏆 ' + t('newBest') }) : null,
       );
       ctx.showModal({
         title: t('lose'),
@@ -623,16 +625,16 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function updateHud(): void {
-    if (hudScore) hudScore.textContent = String(score);
-    if (hudLevel) hudLevel.textContent = String(level);
-    if (hudBest) hudBest.textContent = String(Math.max(score, ctx.storage.getBest(mode) ?? 0));
+    if (hudScore) hudScore.textContent = String(core.score);
+    if (hudLevel) hudLevel.textContent = String(core.level);
+    if (hudBest) hudBest.textContent = String(Math.max(core.score, ctx.storage.getBest(mode) ?? 0));
   }
 
   function updateStatus(force: boolean): void {
-    const sec = Math.floor(elapsed);
+    const sec = Math.floor(core.elapsed);
     if (!force && sec === lastStatusSec) return;
     lastStatusSec = sec;
-    ctx.setStatus(`${t('level')} ${level} · ${formatTime(elapsed)}`);
+    ctx.setStatus(`${t('level')} ${core.level} · ${formatTime(core.elapsed)}`);
   }
 
   // ── Geometry helpers ──────────────────────────────────────────────────
@@ -650,7 +652,7 @@ function create(ctx: GameContext): GameInstance {
 
   /** Y of the free band above the board (no falling block ever reaches it) for banners. */
   function bannerY(): number {
-    const gap = spawnDistance(cfg) - cfg.maxLevels;
+    const gap = spawnDistance(core.cfg) - core.cfg.maxLevels;
     return Math.max(18, L.cy - (L.R + (gap + 1) * L.lvl) / COS30 - 18);
   }
 
@@ -676,6 +678,51 @@ function create(ctx: GameContext): GameInstance {
     c.strokeStyle = `rgba(255,255,255,${alpha})`;
     c.lineWidth = 1.5;
     c.stroke();
+  }
+
+  /**
+   * Small symbol per colour id (dot, triangle, cross, square, ring) at radius `x` of a frame rotated by
+   * `frameDeg`, drawn upright so colours can also be told apart by shape (colour-blind players).
+   */
+  function glyph(c: CanvasRenderingContext2D, x: number, frameDeg: number, id: number): void {
+    const r = Math.max(2.6, Math.min(5, L.lvl * 0.27));
+    c.save();
+    c.translate(x, 0);
+    c.rotate(-frameDeg * DEG);
+    c.fillStyle = theme.glyph;
+    c.strokeStyle = theme.glyph;
+    c.lineWidth = Math.max(1.4, r * 0.42);
+    c.lineCap = 'round';
+    c.beginPath();
+    switch (id % 5) {
+      case 0:
+        c.arc(0, 0, r * 0.78, 0, Math.PI * 2);
+        c.fill();
+        break;
+      case 1:
+        c.moveTo(0, -r);
+        c.lineTo(r * 0.98, r * 0.72);
+        c.lineTo(-r * 0.98, r * 0.72);
+        c.closePath();
+        c.fill();
+        break;
+      case 2:
+        c.moveTo(-r * 0.72, -r * 0.72);
+        c.lineTo(r * 0.72, r * 0.72);
+        c.moveTo(r * 0.72, -r * 0.72);
+        c.lineTo(-r * 0.72, r * 0.72);
+        c.stroke();
+        break;
+      case 3:
+        c.rect(-r * 0.72, -r * 0.72, r * 1.44, r * 1.44);
+        c.fill();
+        break;
+      default:
+        c.arc(0, 0, r * 0.72, 0, Math.PI * 2);
+        c.stroke();
+        break;
+    }
+    c.restore();
   }
 
   /** Pointy-top hexagon path (vertices at 30° + k·60°) around the origin. */
@@ -705,8 +752,8 @@ function create(ctx: GameContext): GameInstance {
     c.save();
     let sx = 0;
     let sy = 0;
-    if (phase === 'over' && overT < 0.5) {
-      const k = (1 - overT / 0.5) * 7;
+    if (phase === 'over' && overT < OVER_SHAKE) {
+      const k = (1 - overT / OVER_SHAKE) * 7;
       sx = Math.sin(overT * 90) * k;
       sy = Math.cos(overT * 70) * k * 0.5;
     }
@@ -724,6 +771,7 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function drawBoard(c: CanvasRenderingContext2D): void {
+    const maxLevels = core.cfg.maxLevels;
     // Play field tint.
     hexPath(c, L.R, 0);
     c.fillStyle = rgba(theme.surface, themeName === 'dark' ? 0.55 : 0.9);
@@ -754,9 +802,9 @@ function create(ctx: GameContext): GameInstance {
     // Danger highlight on the ring where a nearly full stack sits.
     const pulse = 0.55 + 0.45 * Math.sin(animT * 8);
     for (let s = 0; s < SIDES; s++) {
-      const h = sim.stacks[s].length;
-      if (h < cfg.maxLevels - 1) continue;
-      const over = overSides.includes(s) || h > cfg.maxLevels;
+      const h = core.sim.stacks[s].length;
+      if (h < maxLevels - 1) continue;
+      const over = overSides.includes(s) || h > maxLevels;
       const a = sideAngle(s) * DEG;
       const x1 = Math.cos(a - Math.PI / 6) * r2;
       const y1 = Math.sin(a - Math.PI / 6) * r2;
@@ -772,12 +820,14 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function drawStacks(c: CanvasRenderingContext2D): void {
+    const clearing = core.clearing;
     const prog = clearing ? Math.min(1, clearing.t / CLEAR_DUR) : 0;
     for (let s = 0; s < SIDES; s++) {
-      const col = sim.stacks[s];
+      const col = core.sim.stacks[s];
       if (!col.length) continue;
+      const ang = sideAngle(s);
       c.save();
-      c.rotate(sideAngle(s) * DEG);
+      c.rotate(ang * DEG);
       for (let k = 0; k < col.length; k++) {
         const a1 = L.a0 + k * L.lvl;
         const a2 = a1 + L.lvl;
@@ -787,7 +837,8 @@ function create(ctx: GameContext): GameInstance {
         c.fillStyle = color;
         c.fill();
         edgeHighlight(c, a2, 0.3);
-        if (k >= cfg.maxLevels) {
+        glyph(c, (a1 + a2) / 2, ang, col[k]);
+        if (k >= core.cfg.maxLevels) {
           trap(c, a1, a2, 1);
           c.strokeStyle = theme.danger;
           c.lineWidth = 2;
@@ -814,14 +865,14 @@ function create(ctx: GameContext): GameInstance {
   function drawGhosts(c: CanvasRenderingContext2D): void {
     if (phase !== 'playing' && phase !== 'paused') return;
     const seen = new Set<number>();
-    const sorted = sim.falling.slice().sort((a, b) => a.pos - b.pos);
+    const sorted = core.sim.falling.slice().sort((a, b) => a.pos - b.pos);
     for (const f of sorted) {
       if (seen.has(f.lane)) continue;
       seen.add(f.lane);
-      const side = localSide(f.lane, sim.rotation);
-      const h = sim.stacks[side].length;
+      const side = localSide(f.lane, core.sim.rotation);
+      const h = core.sim.stacks[side].length;
       if (f.pos <= h + 0.05) continue;
-      const danger = h >= cfg.maxLevels;
+      const danger = h >= core.cfg.maxLevels;
       const color = danger ? theme.danger : theme.blocks[f.color % theme.blocks.length];
       c.save();
       c.rotate(f.lane * 60 * DEG);
@@ -839,9 +890,10 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function drawFalling(c: CanvasRenderingContext2D): void {
-    for (const f of sim.falling) {
+    for (const f of core.sim.falling) {
+      const ang = f.lane * 60;
       c.save();
-      c.rotate(f.lane * 60 * DEG);
+      c.rotate(ang * DEG);
       const a1 = L.a0 + f.pos * L.lvl;
       const a2 = a1 + L.lvl;
       const color = theme.blocks[f.color % theme.blocks.length];
@@ -855,6 +907,7 @@ function create(ctx: GameContext): GameInstance {
       c.fillStyle = color;
       c.fill();
       edgeHighlight(c, a2, 0.35);
+      glyph(c, (a1 + a2) / 2, ang, f.color);
       c.restore();
     }
   }
@@ -877,7 +930,7 @@ function create(ctx: GameContext): GameInstance {
     c.font = `800 ${Math.round(L.a0 * 0.72)}px ${FONT}`;
     c.textAlign = 'center';
     c.textBaseline = 'middle';
-    c.fillText(String(level), 0, 1);
+    c.fillText(String(core.level), 0, 1);
   }
 
   function drawEffects(c: CanvasRenderingContext2D): void {
@@ -904,8 +957,8 @@ function create(ctx: GameContext): GameInstance {
 
   /** Combo readout in the free band at the bottom of the canvas (reserved by computeBoard). */
   function drawCombo(c: CanvasRenderingContext2D, H: number): void {
-    if ((phase !== 'playing' && phase !== 'paused') || combo < 2) return;
-    const since = elapsed - lastClearAt;
+    if ((phase !== 'playing' && phase !== 'paused') || core.combo < 2) return;
+    const since = core.elapsed - core.lastClearAt;
     if (since > COMBO_WINDOW) return;
     const rem = 1 - since / COMBO_WINDOW;
     const y = H - 48;
@@ -913,7 +966,7 @@ function create(ctx: GameContext): GameInstance {
     c.textBaseline = 'middle';
     c.font = `700 15px ${FONT}`;
     c.fillStyle = theme.warning;
-    c.fillText(`${t('combo', { n: combo })} · ×${comboMultiplier(combo).toFixed(1)}`, L.cx, y);
+    c.fillText(`${t('combo', { n: core.combo })} · ×${comboMultiplier(core.combo).toFixed(1)}`, L.cx, y);
     const w = 128;
     c.fillStyle = rgba(theme.border, 0.8);
     c.fillRect(L.cx - w / 2, y + 13, w, 4);
@@ -941,7 +994,16 @@ function create(ctx: GameContext): GameInstance {
   if (import.meta.env.DEV) {
     const w = window as unknown as { __hx?: unknown };
     w.__hx = {
-      state: () => ({ phase, score, level, combo, rotation: sim.rotation, stacks: sim.stacks.map((c) => c.slice()), falling: sim.falling.map((f) => ({ ...f })) }),
+      state: () => ({
+        phase,
+        score: core.score,
+        level: core.level,
+        combo: core.combo,
+        rotation: core.sim.rotation,
+        stacks: core.sim.stacks.map((c) => c.slice()),
+        falling: core.sim.falling.map((f) => ({ ...f })),
+        looping: raf !== 0,
+      }),
     };
     ctx.onDestroy(() => {
       delete w.__hx;

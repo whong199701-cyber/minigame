@@ -92,13 +92,34 @@ interface FloatText {
   color: string;
 }
 
+/**
+ * Board placement inside the canvas. When the area is much wider than tall (landscape phones, desktop windows)
+ * the board is drawn rotated 90° clockwise so the cells stay large: `gc` × `gr` are the on-screen columns / rows.
+ */
 interface Layout {
   cell: number;
   ox: number;
   oy: number;
   w: number;
   h: number;
+  rot: boolean;
+  gc: number;
+  gr: number;
 }
+
+type BtnVariant = 'primary' | 'secondary' | 'danger';
+
+/** Same markup as ui.button() but silent: the caller plays the one sound that fits the action. */
+function quietButton(label: string, onClick: () => void, variant: BtnVariant, cls = '', size: 'sm' | 'md' | 'lg' = 'md'): HTMLButtonElement {
+  const b = el('button', { class: `btn btn-${variant} btn-${size} ${cls}`, type: 'button' }, el('span', { text: label })) as HTMLButtonElement;
+  b.addEventListener('click', () => {
+    if (!b.disabled) onClick();
+  });
+  return b;
+}
+
+/** Minimum delay between arming and confirming a sale, so a quick double tap cannot sell by accident. */
+const SELL_CONFIRM_DELAY = 400;
 
 function hexToRgb(hex: string): [number, number, number] | null {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
@@ -144,15 +165,21 @@ function create(ctx: GameContext): GameInstance {
   let effects: Effect[] = [];
   let floats: FloatText[] = [];
   let leakFlash = 0;
-  let L: Layout = { cell: 40, ox: 0, oy: 0, w: 0, h: 0 };
+  let L: Layout = { cell: 40, ox: 0, oy: 0, w: 0, h: 0, rot: false, gc: 9, gr: 13 };
   let pal = readPalette();
   let selected: { col: number; row: number } | null = null;
   let previewType: TowerType | null = null;
   let sellArmed = false;
+  let sellArmedAt = 0;
   let lastShoot = -1;
   let lastPop = -1;
   let lastBoom = -1;
+  let lastLeak = -1;
   let drawTime = 0;
+  /** Stored best for the current map / difficulty when this run started (for the "new best" note). */
+  let runBest: number | null = null;
+  let removeRestartBtn: (() => void) | null = null;
+  let removePauseBtn: (() => void) | null = null;
 
   let cv: CanvasHandle | null = null;
   let loop: ReturnType<typeof createLoop> | null = null;
@@ -167,6 +194,7 @@ function create(ctx: GameContext): GameInstance {
   let speedBtn: HTMLButtonElement | null = null;
   let preview: HTMLElement | null = null;
   let waveBtn: HTMLButtonElement | null = null;
+  let waveLabel: HTMLElement | null = null;
   let lastHud = '';
   let lastWaveBtn = '';
   let lastPreviewKey = '';
@@ -204,35 +232,66 @@ function create(ctx: GameContext): GameInstance {
   const diffName = (d: Difficulty) => (d === 'normal' ? t('normal') : t('hard'));
 
   // ── Header / global wiring ────────────────────────────────────────────
-  const removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
-  const removePause = ctx.addHeaderAction({ icon: '⏸', label: t('pause'), onClick: togglePause });
+  // ↻ and ⏸ only exist on the game screen; the pause button shows ▶ while paused.
+  function addGameHeaderButtons(): void {
+    removeGameHeaderButtons();
+    removeRestartBtn = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: onRestart });
+    refreshPauseButton();
+  }
+
+  function refreshPauseButton(): void {
+    if (screen !== 'game') return;
+    removePauseBtn?.();
+    removePauseBtn = paused
+      ? ctx.addHeaderAction({ icon: '▶', label: t('resume'), onClick: togglePause })
+      : ctx.addHeaderAction({ icon: '⏸', label: t('pause'), onClick: togglePause });
+  }
+
+  function removeGameHeaderButtons(): void {
+    removeRestartBtn?.();
+    removePauseBtn?.();
+    removeRestartBtn = null;
+    removePauseBtn = null;
+  }
 
   const onKey = (e: KeyboardEvent): void => {
     if (screen !== 'game' || !sim) return;
     if (e.key === ' ' || e.key === 'Enter') {
-      if (paused) resumeGame();
+      if (modalOpen) return;
+      if (paused) resumeGame(true);
       else if (waveBtn && !waveBtn.disabled) waveBtn.click();
       e.preventDefault();
     } else if (e.key === 'p' || e.key === 'P') {
-      togglePause();
+      togglePause(true);
     } else if (e.key === 'Escape') {
       if (menu) closeMenu();
-      else togglePause();
+      else togglePause(true);
     } else if (e.key === 'f' || e.key === 'F') {
       toggleSpeed();
     }
   };
   window.addEventListener('keydown', onKey);
 
+  // "Tap elsewhere closes": any press inside the game outside the open menu closes it. The canvas handles its
+  // own taps (tapping the selected cell again closes, another cell moves the menu).
+  const onRootDown = (e: PointerEvent): void => {
+    if (!menu) return;
+    const target = e.target as Node | null;
+    if (!target || menu.contains(target) || (cv && target === cv.canvas)) return;
+    closeMenu();
+  };
+  root.addEventListener('pointerdown', onRootDown);
+
   ctx.onDestroy(() => {
-    removeRestart();
-    removePause();
+    removeGameHeaderButtons();
     window.removeEventListener('keydown', onKey);
+    root.removeEventListener('pointerdown', onRootDown);
     recordProgress();
     teardownGame();
   });
   ctx.onVisibility((visible) => {
     if (!visible) {
+      recordProgress();
       if (screen === 'game' && !paused && !finished) pauseGame();
       loop?.stop();
     } else if (screen === 'game' && cv) {
@@ -302,29 +361,38 @@ function create(ctx: GameContext): GameInstance {
       mapsRow.append(card);
     }
 
+    // Two columns: stacked in portrait, side by side on short landscape screens (see style.css).
     root.append(
       el(
         'div',
         { class: 'start-screen td-start' },
-        el('div', { class: 'big-icon', text: '🏰' }),
-        el('p', { class: 'muted td-start-desc', text: t('desc') }),
-        mapsRow,
-        mapDesc,
-        segmented<Difficulty>(
-          [
-            { value: 'normal', label: t('normal') },
-            { value: 'hard', label: t('hard') },
-          ],
-          diff,
-          (d) => {
-            diff = d;
-            ctx.storage.set('diff', d);
-            refresh();
-          },
+        el(
+          'div',
+          { class: 'td-start-col' },
+          el('div', { class: 'big-icon', text: '🏰' }),
+          el('p', { class: 'muted td-start-desc', text: t('desc') }),
+          mapsRow,
+          mapDesc,
         ),
-        diffDesc,
-        bestLine,
-        button(t('play'), () => startGame(), { variant: 'primary', size: 'lg', class: 'td-play' }),
+        el(
+          'div',
+          { class: 'td-start-col' },
+          segmented<Difficulty>(
+            [
+              { value: 'normal', label: t('normal') },
+              { value: 'hard', label: t('hard') },
+            ],
+            diff,
+            (d) => {
+              diff = d;
+              ctx.storage.set('diff', d);
+              refresh();
+            },
+          ),
+          diffDesc,
+          bestLine,
+          button(t('play'), () => startGame(), { variant: 'primary', size: 'lg', class: 'td-play' }),
+        ),
       ),
     );
     refresh();
@@ -363,8 +431,10 @@ function create(ctx: GameContext): GameInstance {
     root.innerHTML = '';
     thumbs = [];
     sim = createGame(findMap(mapId), diff);
+    runBest = ctx.storage.getBest(modeKey(sim.map.id, sim.difficulty));
     paused = false;
     finished = false;
+    modalOpen = false;
     acc = 0;
     effects = [];
     floats = [];
@@ -376,27 +446,30 @@ function create(ctx: GameContext): GameInstance {
     lastWaveBtn = '';
     lastPreviewKey = '';
     lastMenuMoney = -1;
+    lastTickSec = -1;
+    lastLeak = -1;
     drawTime = 0;
 
-    hudWave = el('span', { class: 'stat-value' });
-    hudLives = el('span', { class: 'stat-value' });
-    hudGold = el('span', { class: 'stat-value' });
-    hudLivesWrap = el('div', { class: 'stat' }, el('span', { class: 'stat-label', text: t('lives') }), hudLives);
-    speedBtn = el('button', { class: 'td-hudbtn', type: 'button', 'aria-label': t('speed'), onClick: () => toggleSpeed() }) as HTMLButtonElement;
+    // Compact single-line HUD so the 9 × 13 board gets as much height as possible on phones.
+    hudWave = el('b', { class: 'td-stat-value' });
+    hudLives = el('b', { class: 'td-stat-value' });
+    hudGold = el('b', { class: 'td-stat-value' });
+    hudLivesWrap = el('div', { class: 'td-stat', title: t('lives'), 'aria-label': t('lives') }, el('span', { class: 'td-stat-icon', text: '❤️' }), hudLives);
     const hud = el(
       'div',
-      { class: 'game-hud td-hud' },
-      el('div', { class: 'stat' }, el('span', { class: 'stat-label', text: t('wave') }), hudWave),
+      { class: 'td-hud' },
+      el('div', { class: 'td-stat' }, el('span', { class: 'td-stat-label', text: t('wave') }), hudWave),
       hudLivesWrap,
-      el('div', { class: 'stat' }, el('span', { class: 'stat-label', text: t('gold') }), hudGold),
-      el('div', { class: 'td-hud-btns' }, speedBtn),
+      el('div', { class: 'td-stat', title: t('gold'), 'aria-label': t('gold') }, el('span', { class: 'td-stat-icon', text: '💰' }), hudGold),
     );
 
     area = el('div', { class: 'td-area' });
-    preview = el('div', { class: 'td-preview' });
-    waveBtn = button('', () => onWaveButton(), { variant: 'primary', size: 'lg', class: 'td-wave-btn' });
-    const controls = el('div', { class: 'td-controls' }, preview, waveBtn);
-    root.append(hud, area, controls);
+    speedBtn = el('button', { class: 'td-speed', type: 'button', 'aria-label': t('speed'), title: t('speed'), onClick: () => toggleSpeed() }) as HTMLButtonElement;
+    waveLabel = el('span', { class: 'td-wave-label' });
+    preview = el('span', { class: 'td-preview' });
+    waveBtn = el('button', { class: 'btn btn-primary btn-lg td-wave-btn', type: 'button', onClick: () => onWaveButton() }, waveLabel, preview) as HTMLButtonElement;
+    const controls = el('div', { class: 'td-controls' }, speedBtn, waveBtn);
+    root.append(el('div', { class: 'td-game' }, hud, area, controls));
 
     cv = createCanvas(area, (w, h) => {
       layout(w, h);
@@ -404,6 +477,7 @@ function create(ctx: GameContext): GameInstance {
     });
     offPointer = installPointer(cv.canvas);
     loop = createLoop((dt) => frame(dt));
+    addGameHeaderButtons();
     updateSpeedBtn();
     updateStatus();
     updateHud();
@@ -427,16 +501,26 @@ function create(ctx: GameContext): GameInstance {
     area = null;
     preview = null;
     waveBtn = null;
+    waveLabel = null;
     hudWave = hudLives = hudGold = hudLivesWrap = null;
     speedBtn = null;
     sim = null;
     selected = null;
+    paused = false;
+    removeGameHeaderButtons();
   }
 
   function layout(w: number, h: number): void {
     if (!sim) return;
-    const cell = Math.max(8, Math.floor(Math.min(w / sim.map.cols, h / sim.map.rows)));
-    L = { cell, ox: Math.floor((w - cell * sim.map.cols) / 2), oy: Math.floor((h - cell * sim.map.rows) / 2), w, h };
+    const { cols, rows } = sim.map;
+    const upright = Math.min(w / cols, h / rows);
+    const turned = Math.min(w / rows, h / cols);
+    // Rotate only when it clearly helps (landscape phones, wide windows), never on portrait phones.
+    const rot = turned > upright * 1.1;
+    const gc = rot ? rows : cols;
+    const gr = rot ? cols : rows;
+    const cell = Math.max(8, Math.floor(rot ? turned : upright));
+    L = { cell, ox: Math.floor((w - cell * gc) / 2), oy: Math.floor((h - cell * gr) / 2), w, h, rot, gc, gr };
   }
 
   function recordProgress(): void {
@@ -445,8 +529,15 @@ function create(ctx: GameContext): GameInstance {
   }
 
   // ── Frame ─────────────────────────────────────────────────────────────
+  /** A shell modal we did not open ourselves (e.g. the header "?" rules) is on screen. */
+  function foreignModalOpen(): boolean {
+    return !modalOpen && document.querySelector('.modal-layer .modal-backdrop:not(.closing)') !== null;
+  }
+
   function frame(dt: number): void {
     if (!sim || !cv) return;
+    // Reading the rules mid-wave must not cost lives: pause under any modal the game did not open.
+    if (!paused && !finished && foreignModalOpen()) pauseGame();
     const scale = paused || finished ? 0 : speed;
     if (scale > 0) {
       acc = Math.min(acc + dt * scale, MAX_SIM_PER_FRAME);
@@ -495,6 +586,8 @@ function create(ctx: GameContext): GameInstance {
   function handleEvents(events: GameEvent[]): void {
     if (!sim) return;
     const now = drawTime;
+    let leaks = 0;
+    let bossLeak = false;
     for (const ev of events) {
       switch (ev.type) {
         case 'shoot':
@@ -538,13 +631,14 @@ function create(ctx: GameContext): GameInstance {
           break;
         }
         case 'leak':
-          leakFlash = 0.5;
-          ctx.play('error');
-          ctx.haptic(ev.enemy === 'boss' ? 'heavy' : 'medium');
+          leaks++;
+          if (ev.enemy === 'boss') bossLeak = true;
           break;
         case 'spawn':
           break;
         case 'waveStart':
+          // Save "highest wave reached" as soon as it is reached, whatever way the player leaves later.
+          recordProgress();
           ctx.play('swoosh');
           updateStatus();
           if (ev.bonus > 0) {
@@ -573,6 +667,15 @@ function create(ctx: GameContext): GameInstance {
           break;
       }
     }
+    if (leaks > 0) {
+      leakFlash = 0.5;
+      // One sound / vibration per burst of leaks (a boss leak always gets its heavy buzz).
+      if (bossLeak || now - lastLeak > 0.3) {
+        lastLeak = now;
+        ctx.play('error');
+        ctx.haptic(bossLeak ? 'heavy' : 'medium');
+      }
+    }
   }
 
   // ── HUD / controls ────────────────────────────────────────────────────
@@ -589,13 +692,13 @@ function create(ctx: GameContext): GameInstance {
     if (key === lastHud) return;
     lastHud = key;
     hudWave.textContent = sim.endless ? `${sim.wave} ∞` : `${Math.max(sim.wave, 1)}/${WAVES_PER_MAP}`;
-    hudLives.textContent = `❤️ ${sim.lives}`;
-    hudGold.textContent = `💰 ${sim.money}`;
+    hudLives.textContent = String(sim.lives);
+    hudGold.textContent = String(sim.money);
     hudLivesWrap.classList.toggle('td-lives-low', sim.lives <= Math.ceil(DIFFICULTY[sim.difficulty].lives * 0.25));
   }
 
   function updateWaveButton(): void {
-    if (!sim || !waveBtn) return;
+    if (!sim || !waveBtn || !waveLabel) return;
     let label = '';
     let disabled = false;
     if (sim.phase === 'ready') label = t('startWave', { n: 1 });
@@ -618,11 +721,11 @@ function create(ctx: GameContext): GameInstance {
     const key = label + (disabled ? '|d' : '');
     if (key === lastWaveBtn) return;
     lastWaveBtn = key;
-    const span = waveBtn.querySelector('span:last-child');
-    if (span) span.textContent = label;
+    waveLabel.textContent = label;
     waveBtn.disabled = disabled;
   }
 
+  /** Composition of the next wave, shown as the second line of the wave button. */
   function updatePreview(): void {
     if (!sim || !preview) return;
     const next = sim.wave + 1;
@@ -630,6 +733,7 @@ function create(ctx: GameContext): GameInstance {
     if (key === lastPreviewKey) return;
     lastPreviewKey = key;
     preview.innerHTML = '';
+    preview.hidden = sim.phase === 'over' || sim.phase === 'cleared';
     const groups = waveComposition(next);
     preview.append(el('span', { text: sim.phase === 'ready' ? `${t('wave')} ${next}:` : `${t('nextLabel')} ${next}:` }));
     for (const g of groups) {
@@ -660,6 +764,7 @@ function create(ctx: GameContext): GameInstance {
   function onWaveButton(): void {
     if (!sim || paused || finished) return;
     if (sim.phase === 'cleared') {
+      ctx.play('tap');
       continueEndless(sim);
       updateStatus();
       return;
@@ -683,63 +788,43 @@ function create(ctx: GameContext): GameInstance {
       { class: 'overlay td-pause' },
       el('div', { class: 'td-pause-icon', text: '⏸' }),
       el('h2', { text: t('paused') }),
-      el('p', { class: 'muted', text: t('tapToResume') }),
+      el('p', { class: 'muted td-pause-hint', text: t('tapToResume') }),
       button(t('resume'), () => resumeGame(), { variant: 'primary', size: 'lg' }),
+      button(t('changeMap'), () => confirmChangeMap(), { variant: 'secondary' }),
       button(t('home'), () => confirmQuit(), { variant: 'secondary' }),
     );
     overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) resumeGame();
+      if (e.target === overlay) resumeGame(true);
     });
     area.append(overlay);
+    refreshPauseButton();
   }
 
-  function resumeGame(): void {
-    if (!paused) return;
+  /** `sound`: play the tap here (keyboard, overlay background); buttons already play their own. */
+  function resumeGame(sound = false): void {
+    if (!paused || modalOpen || foreignModalOpen()) return;
     paused = false;
     overlay?.remove();
     overlay = null;
-    ctx.play('tap');
+    if (sound) ctx.play('tap');
+    refreshPauseButton();
     loop?.start();
   }
 
-  function togglePause(): void {
+  function togglePause(sound = false): void {
     if (screen !== 'game' || finished || modalOpen) return;
-    if (paused) resumeGame();
+    if (paused) resumeGame(sound);
     else pauseGame();
   }
 
-  function confirmQuit(): void {
-    modalOpen = true;
-    ctx.showModal({
-      title: t('quit'),
-      body: t('quitConfirm'),
-      dismissible: false,
-      buttons: [
-        { label: t('cancel'), onClick: () => (modalOpen = false) },
-        {
-          label: t('confirm'),
-          primary: true,
-          onClick: () => {
-            modalOpen = false;
-            recordProgress();
-            ctx.exit();
-          },
-        },
-      ],
-    });
-  }
-
-  function onRestart(): void {
-    if (screen === 'start' || modalOpen) return;
-    if (finished || (sim && sim.wave === 0)) {
-      showStart();
-      return;
-    }
+  /** Confirm dialog shown over the (paused) game; `action` runs after recording the wave reached. */
+  function confirmLeave(title: string, body: string, action: () => void): void {
+    if (!sim) return;
     if (!paused) pauseGame();
     modalOpen = true;
     ctx.showModal({
-      title: t('restart'),
-      body: t('quitConfirm'),
+      title,
+      body,
       dismissible: false,
       buttons: [
         { label: t('cancel'), onClick: () => (modalOpen = false) },
@@ -749,20 +834,45 @@ function create(ctx: GameContext): GameInstance {
           onClick: () => {
             modalOpen = false;
             recordProgress();
-            showStart();
+            action();
           },
         },
       ],
     });
   }
 
+  function confirmQuit(): void {
+    confirmLeave(t('quit'), t('quitConfirm'), () => ctx.exit());
+  }
+
+  function confirmChangeMap(): void {
+    confirmLeave(t('changeMap'), t('changeMapConfirm'), () => showStart());
+  }
+
+  /** ↻ restarts the same map and difficulty (confirming first once there is something to lose). */
+  function onRestart(): void {
+    if (screen !== 'game' || !sim || modalOpen) return;
+    if (finished || (sim.wave === 0 && sim.towers.length === 0)) {
+      recordProgress();
+      startGame();
+      return;
+    }
+    confirmLeave(t('restart'), t('restartConfirm', { map: mapName(sim.map.id), diff: diffName(sim.difficulty) }), () => startGame());
+  }
+
   // ── End of round ──────────────────────────────────────────────────────
+  /** Records the result and tells whether it beats the best stored before this run started. */
+  function finishRecord(): boolean {
+    if (!sim) return false;
+    recordProgress();
+    return sim.wave > (runBest ?? 0);
+  }
+
   function onGameOver(): void {
     if (!sim || finished) return;
     finished = true;
     closeMenu();
-    const key = modeKey(sim.map.id, sim.difficulty);
-    const isBest = ctx.storage.recordBest(key, sim.wave, 'higher');
+    const isBest = finishRecord();
     ctx.play('lose');
     ctx.haptic('error');
     const body = t('gameOverBody', { map: mapName(sim.map.id), diff: diffName(sim.difficulty), n: sim.wave, k: sim.kills }) + (isBest ? '\n🏆 ' + t('newBest') : '');
@@ -783,7 +893,7 @@ function create(ctx: GameContext): GameInstance {
     if (!sim) return;
     closeMenu();
     const key = modeKey(sim.map.id, sim.difficulty);
-    const isBest = ctx.storage.recordBest(key, sim.wave, 'higher');
+    const isBest = finishRecord();
     ctx.storage.set('cleared:' + key, true);
     ctx.play('win');
     ctx.haptic('success');
@@ -842,10 +952,11 @@ function create(ctx: GameContext): GameInstance {
 
   function cellAt(x: number, y: number): { col: number; row: number } | null {
     if (!sim) return null;
-    const col = Math.floor((x - L.ox) / L.cell);
-    const row = Math.floor((y - L.oy) / L.cell);
-    if (col < 0 || row < 0 || col >= sim.map.cols || row >= sim.map.rows) return null;
-    return { col, row };
+    const gx = Math.floor((x - L.ox) / L.cell);
+    const gy = Math.floor((y - L.oy) / L.cell);
+    if (gx < 0 || gy < 0 || gx >= L.gc || gy >= L.gr) return null;
+    // Inverse of vx / vy: in the rotated view screen column gx shows map row (rows - 1 - gx).
+    return L.rot ? { col: gy, row: sim.map.rows - 1 - gx } : { col: gx, row: gy };
   }
 
   function onTap(x: number, y: number): void {
@@ -880,22 +991,29 @@ function create(ctx: GameContext): GameInstance {
     sellArmed = false;
   }
 
+  /** Places the menu next to the cell without covering it: below, above, right or left, whichever fits first. */
   function positionMenu(m: HTMLElement, col: number, row: number): void {
     if (!cv) return;
-    const cx = L.ox + (col + 0.5) * L.cell;
-    const top = L.oy + row * L.cell;
-    const bottom = top + L.cell;
+    const pad = 6;
+    const gap = 8;
+    const left = vx(col, row + 1);
+    const top = vy(col, row);
+    const size = L.cell;
     const mw = m.offsetWidth || 236;
     const mh = m.offsetHeight || 180;
-    let left = cx - mw / 2;
-    left = clamp(left, 6, Math.max(6, L.w - mw - 6));
-    let y = bottom + 8;
-    if (y + mh > L.h - 6) y = top - mh - 8;
-    if (y < 6) y = clamp(L.h - mh - 6, 6, L.h);
-    // Taller than the whole area (landscape phones): centre it and let it overflow.
-    if (mh > L.h - 12) y = Math.round((L.h - mh) / 2);
-    m.style.left = `${Math.round(left)}px`;
-    m.style.top = `${Math.round(y)}px`;
+    const hx = clamp(left + size / 2 - mw / 2, pad, Math.max(pad, L.w - mw - pad));
+    const vyc = clamp(top + size / 2 - mh / 2, pad, Math.max(pad, L.h - mh - pad));
+    const fitsY = (y: number) => y >= pad && y + mh <= L.h - pad;
+    const fitsX = (x: number) => x >= pad && x + mw <= L.w - pad;
+    const options: { x: number; y: number; ok: boolean }[] = [
+      { x: hx, y: top + size + gap, ok: fitsY(top + size + gap) },
+      { x: hx, y: top - mh - gap, ok: fitsY(top - mh - gap) },
+      { x: left + size + gap, y: vyc, ok: fitsX(left + size + gap) && mh <= L.h - 2 * pad },
+      { x: left - mw - gap, y: vyc, ok: fitsX(left - mw - gap) && mh <= L.h - 2 * pad },
+    ];
+    const pick = options.find((o) => o.ok) ?? { x: hx, y: mh > L.h - 2 * pad ? Math.round((L.h - mh) / 2) : vyc };
+    m.style.left = `${Math.round(pick.x)}px`;
+    m.style.top = `${Math.round(pick.y)}px`;
   }
 
   function openBuildMenu(col: number, row: number): void {
@@ -974,7 +1092,7 @@ function create(ctx: GameContext): GameInstance {
       extra,
     );
     const cost = upgradeCost(tower);
-    const upBtn = button(cost === null ? t('maxLevel') : t('upgradeCost', { n: cost }), () => {
+    const upBtn = quietButton(cost === null ? t('maxLevel') : t('upgradeCost', { n: cost }), () => {
       if (!sim || sim !== s) return;
       const c = upgradeCost(tower);
       if (c === null) return;
@@ -988,32 +1106,36 @@ function create(ctx: GameContext): GameInstance {
         ctx.haptic('medium');
         openTowerMenu(col, row, tower);
       }
-    }, { variant: 'primary', class: 'td-up-btn' });
+    }, 'primary', 'td-up-btn');
     upBtn.dataset.cost = cost === null ? '' : String(cost);
     if (cost === null) upBtn.disabled = true;
-    const sellBtn = button(t('sellValue', { n: sellValue(tower) }), () => {
+    const sellBtn = quietButton(t('sellValue', { n: sellValue(tower) }), () => {
       if (!sim || sim !== s) return;
       if (!sellArmed) {
         sellArmed = true;
+        sellArmedAt = performance.now();
+        ctx.play('tap');
         sellBtn.classList.add('armed');
         const span = sellBtn.querySelector('span:last-child');
         if (span) span.textContent = t('confirmSell');
         return;
       }
+      // A fast double tap must not get through the confirmation step.
+      if (performance.now() - sellArmedAt < SELL_CONFIRM_DELAY) return;
       const refund = sell(sim, tower.id);
       ctx.play('pop');
       ctx.haptic('light');
       pushFloat({ x: tower.x, y: tower.y - 0.3, text: `+${refund} 💰`, t: 0, dur: 1.2, color: pal.warning });
       closeMenu();
-    }, { variant: 'danger' });
+    }, 'danger');
     const rows: HTMLElement[] = [];
     if (!def.aura) {
-      const tgt = button(tower.targeting === 'first' ? t('targetFirst') : t('targetStrongest'), () => {
+      const tgt = quietButton(tower.targeting === 'first' ? t('targetFirst') : t('targetStrongest'), () => {
         if (!sim || sim !== s) return;
         setTargeting(sim, tower.id, tower.targeting === 'first' ? 'strongest' : 'first');
         ctx.play('tap');
         openTowerMenu(col, row, tower);
-      }, { variant: 'secondary', size: 'sm', class: 'td-target-btn' });
+      }, 'secondary', 'td-target-btn', 'sm');
       rows.push(tgt);
     }
     const money = el('span', { class: 'muted td-menu-money' });
@@ -1055,11 +1177,17 @@ function create(ctx: GameContext): GameInstance {
   }
 
   // ── Drawing ───────────────────────────────────────────────────────────
-  function px(v: number): number {
-    return L.ox + v * L.cell;
+  // Map coordinates (cells, x right / y down) → canvas px. In the rotated view the board is turned 90°
+  // clockwise: map x runs down the screen and map y runs right to left.
+  function vx(x: number, y: number): number {
+    return L.rot ? L.ox + (L.gc - y) * L.cell : L.ox + x * L.cell;
   }
-  function py(v: number): number {
-    return L.oy + v * L.cell;
+  function vy(x: number, y: number): number {
+    return L.rot ? L.oy + x * L.cell : L.oy + y * L.cell;
+  }
+  /** Map angle → screen angle. */
+  function va(a: number): number {
+    return L.rot ? a + Math.PI / 2 : a;
   }
 
   function draw(): void {
@@ -1071,23 +1199,23 @@ function create(ctx: GameContext): GameInstance {
 
     // Board
     g.fillStyle = pal.cell;
-    g.fillRect(L.ox, L.oy, cell * s.map.cols, cell * s.map.rows);
+    g.fillRect(L.ox, L.oy, cell * L.gc, cell * L.gr);
     g.strokeStyle = pal.grid;
     g.lineWidth = 1;
     g.beginPath();
-    for (let c = 1; c < s.map.cols; c++) {
+    for (let c = 1; c < L.gc; c++) {
       g.moveTo(L.ox + c * cell + 0.5, L.oy);
-      g.lineTo(L.ox + c * cell + 0.5, L.oy + s.map.rows * cell);
+      g.lineTo(L.ox + c * cell + 0.5, L.oy + L.gr * cell);
     }
-    for (let r = 1; r < s.map.rows; r++) {
+    for (let r = 1; r < L.gr; r++) {
       g.moveTo(L.ox, L.oy + r * cell + 0.5);
-      g.lineTo(L.ox + s.map.cols * cell, L.oy + r * cell + 0.5);
+      g.lineTo(L.ox + L.gc * cell, L.oy + r * cell + 0.5);
     }
     g.stroke();
 
     // Path strip
     g.fillStyle = pal.path;
-    for (const [c, r] of s.geom.cells) g.fillRect(L.ox + c * cell, L.oy + r * cell, cell, cell);
+    for (const [c, r] of s.geom.cells) g.fillRect(vx(c, r + 1), vy(c, r), cell, cell);
     // Direction chevrons every few cells
     g.strokeStyle = rgba(pal.text, 0.16);
     g.lineWidth = Math.max(1, cell * 0.06);
@@ -1095,10 +1223,10 @@ function create(ctx: GameContext): GameInstance {
     for (let i = 1; i < s.geom.cells.length - 1; i += 3) {
       const [c, r] = s.geom.cells[i];
       const [nc, nr] = s.geom.cells[i + 1];
-      const dx = nc - c;
-      const dy = nr - r;
-      const cx = px(c + 0.5);
-      const cy = py(r + 0.5);
+      const dx = L.rot ? r - nr : nc - c;
+      const dy = L.rot ? nc - c : nr - r;
+      const cx = vx(c + 0.5, r + 0.5);
+      const cy = vy(c + 0.5, r + 0.5);
       const a = cell * 0.16;
       g.beginPath();
       g.moveTo(cx - dx * a - dy * a, cy - dy * a + dx * a);
@@ -1110,14 +1238,14 @@ function create(ctx: GameContext): GameInstance {
     const [sc, sr] = s.geom.cells[0];
     g.fillStyle = rgba(pal.danger, 0.55);
     g.beginPath();
-    g.arc(px(sc + 0.5), py(sr + 0.5), cell * 0.12, 0, Math.PI * 2);
+    g.arc(vx(sc + 0.5, sr + 0.5), vy(sc + 0.5, sr + 0.5), cell * 0.12, 0, Math.PI * 2);
     g.fill();
     const [lc, lr] = s.geom.cells[s.geom.cells.length - 1];
     g.font = `${Math.round(cell * 0.72)}px system-ui, "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     g.fillStyle = pal.text;
-    g.fillText('🏰', px(lc + 0.5), py(lr + 0.54));
+    g.fillText('🏰', vx(lc + 0.5, lr + 0.5), vy(lc + 0.5, lr + 0.5) + cell * 0.04);
 
     // Selection + range preview
     if (selected) {
@@ -1133,7 +1261,7 @@ function create(ctx: GameContext): GameInstance {
       g.strokeStyle = pal.accent;
       g.lineWidth = 2;
       g.fillStyle = rgba(pal.accent, 0.18);
-      roundRect(g, px(selected.col) + 1.5, py(selected.row) + 1.5, cell - 3, cell - 3, cell * 0.18);
+      roundRect(g, vx(selected.col, selected.row + 1) + 1.5, vy(selected.col, selected.row) + 1.5, cell - 3, cell - 3, cell * 0.18);
       g.fill();
       g.stroke();
     }
@@ -1143,24 +1271,26 @@ function create(ctx: GameContext): GameInstance {
     // Ground enemies, projectiles, flyers
     for (const e of s.enemies) if (!e.flying) drawEnemy(g, e);
     for (const p of s.projectiles) {
+      const x = vx(p.x, p.y);
+      const y = vy(p.x, p.y);
       if (p.kind === 'cannon') {
         g.fillStyle = '#2b2b33';
         g.strokeStyle = TOWER_COLOR.cannon;
         g.lineWidth = 1.5;
         g.beginPath();
-        g.arc(px(p.x), py(p.y), cell * 0.11, 0, Math.PI * 2);
+        g.arc(x, y, cell * 0.11, 0, Math.PI * 2);
         g.fill();
         g.stroke();
       } else {
-        const dx = p.tx - p.x;
-        const dy = p.ty - p.y;
+        const dx = vx(p.tx, p.ty) - x;
+        const dy = vy(p.tx, p.ty) - y;
         const d = Math.hypot(dx, dy) || 1;
         const len = cell * 0.26;
         g.strokeStyle = TOWER_COLOR[p.kind];
         g.lineWidth = 2;
         g.beginPath();
-        g.moveTo(px(p.x) - (dx / d) * len * 0.5, py(p.y) - (dy / d) * len * 0.5);
-        g.lineTo(px(p.x) + (dx / d) * len * 0.5, py(p.y) + (dy / d) * len * 0.5);
+        g.moveTo(x - (dx / d) * len * 0.5, y - (dy / d) * len * 0.5);
+        g.lineTo(x + (dx / d) * len * 0.5, y + (dy / d) * len * 0.5);
         g.stroke();
       }
     }
@@ -1175,7 +1305,7 @@ function create(ctx: GameContext): GameInstance {
       const k = f.t / f.dur;
       g.globalAlpha = 1 - k * k;
       g.fillStyle = f.color;
-      g.fillText(f.text, px(f.x), py(f.y) - k * cell * 0.8);
+      g.fillText(f.text, vx(f.x, f.y), vy(f.x, f.y) - k * cell * 0.8);
     }
     g.globalAlpha = 1;
 
@@ -1193,7 +1323,7 @@ function create(ctx: GameContext): GameInstance {
   function drawRange(g: CanvasRenderingContext2D, cx: number, cy: number, range: number, color: string, dashed: boolean): void {
     g.save();
     g.beginPath();
-    g.arc(px(cx), py(cy), range * L.cell, 0, Math.PI * 2);
+    g.arc(vx(cx, cy), vy(cx, cy), range * L.cell, 0, Math.PI * 2);
     if (dashed) {
       g.setLineDash([4, 5]);
       g.strokeStyle = rgba(color, 0.45);
@@ -1211,8 +1341,9 @@ function create(ctx: GameContext): GameInstance {
 
   function drawTower(g: CanvasRenderingContext2D, tw: Tower): void {
     const { cell } = L;
-    const cx = px(tw.x);
-    const cy = py(tw.y);
+    const cx = vx(tw.x, tw.y);
+    const cy = vy(tw.x, tw.y);
+    const angle = va(tw.angle);
     const color = TOWER_COLOR[tw.type];
     const base = cell * 0.8;
     // Base plate
@@ -1234,7 +1365,7 @@ function create(ctx: GameContext): GameInstance {
     const r = cell * 0.24;
     const dark = 'rgba(0,0,0,0.35)';
     if (tw.type === 'arrow') {
-      g.rotate(tw.angle);
+      g.rotate(angle);
       g.fillStyle = color;
       g.strokeStyle = dark;
       g.lineWidth = 1;
@@ -1266,7 +1397,7 @@ function create(ctx: GameContext): GameInstance {
       g.lineTo(-r * 1.15, r * 0.3);
       g.stroke();
     } else if (tw.type === 'cannon') {
-      g.rotate(tw.angle);
+      g.rotate(angle);
       g.fillStyle = color;
       g.strokeStyle = dark;
       g.lineWidth = 1;
@@ -1306,7 +1437,7 @@ function create(ctx: GameContext): GameInstance {
         g.stroke();
       }
     } else {
-      g.rotate(tw.angle);
+      g.rotate(angle);
       g.fillStyle = color;
       g.strokeStyle = dark;
       g.lineWidth = 1;
@@ -1330,15 +1461,17 @@ function create(ctx: GameContext): GameInstance {
 
   function drawEnemy(g: CanvasRenderingContext2D, e: Enemy): void {
     const { cell } = L;
-    const cx = px(e.x);
-    const cy = py(e.y) - (e.flying ? cell * 0.22 : 0);
+    const ex = vx(e.x, e.y);
+    const ey = vy(e.x, e.y);
+    const cx = ex;
+    const cy = ey - (e.flying ? cell * 0.22 : 0);
     const r = e.radius * cell;
     const color = ENEMY_COLOR[e.type];
     const slowed = sim ? slowFactor(e, sim.time) > 0 : false;
     if (e.flying) {
       g.fillStyle = 'rgba(0,0,0,0.22)';
       g.beginPath();
-      g.ellipse(px(e.x), py(e.y) + cell * 0.12, r * 0.9, r * 0.4, 0, 0, Math.PI * 2);
+      g.ellipse(ex, ey + cell * 0.12, r * 0.9, r * 0.4, 0, 0, Math.PI * 2);
       g.fill();
     }
     g.fillStyle = color;
@@ -1414,7 +1547,7 @@ function create(ctx: GameContext): GameInstance {
         g.strokeStyle = rgba(e.color, 1 - k);
         g.lineWidth = 3 * (1 - k) + 1;
         g.beginPath();
-        g.arc(px(e.x), py(e.y), e.r * cell * (0.4 + 0.6 * k), 0, Math.PI * 2);
+        g.arc(vx(e.x, e.y), vy(e.x, e.y), e.r * cell * (0.4 + 0.6 * k), 0, Math.PI * 2);
         g.stroke();
         g.fillStyle = rgba(e.color, 0.25 * (1 - k));
         g.fill();
@@ -1422,25 +1555,27 @@ function create(ctx: GameContext): GameInstance {
         g.strokeStyle = rgba(e.color, 0.8 * (1 - k));
         g.lineWidth = 2;
         g.beginPath();
-        g.arc(px(e.x), py(e.y), e.r * cell * (0.2 + 0.8 * k), 0, Math.PI * 2);
+        g.arc(vx(e.x, e.y), vy(e.x, e.y), e.r * cell * (0.2 + 0.8 * k), 0, Math.PI * 2);
         g.stroke();
       } else if (e.kind === 'tracer') {
         g.strokeStyle = rgba(e.color, 0.9 * (1 - k));
         g.lineWidth = 2.5 * (1 - k) + 0.5;
         g.beginPath();
-        g.moveTo(px(e.x), py(e.y));
-        g.lineTo(px(e.x2), py(e.y2));
+        g.moveTo(vx(e.x, e.y), vy(e.x, e.y));
+        g.lineTo(vx(e.x2, e.y2), vy(e.x2, e.y2));
         g.stroke();
       } else if (e.kind === 'spark') {
         g.fillStyle = rgba(e.color, 1 - k);
         g.beginPath();
-        g.arc(px(e.x), py(e.y), e.r * cell * (1 - k * 0.5), 0, Math.PI * 2);
+        g.arc(vx(e.x, e.y), vy(e.x, e.y), e.r * cell * (1 - k * 0.5), 0, Math.PI * 2);
         g.fill();
       } else {
         g.fillStyle = rgba(e.color, 1 - k);
         for (const p of e.parts) {
           g.beginPath();
-          g.arc(px(e.x + p.dx * k * 1.6 * e.r * 2), py(e.y + p.dy * k * 1.6 * e.r * 2), cell * 0.06 * (1 - k * 0.5), 0, Math.PI * 2);
+          const bx = e.x + p.dx * k * 1.6 * e.r * 2;
+          const by = e.y + p.dy * k * 1.6 * e.r * 2;
+          g.arc(vx(bx, by), vy(bx, by), cell * 0.06 * (1 - k * 0.5), 0, Math.PI * 2);
           g.fill();
         }
       }
@@ -1449,7 +1584,10 @@ function create(ctx: GameContext): GameInstance {
 
   showStart();
   return {
+    // The shell calls destroy() before the onDestroy callbacks (header ‹, back gesture, language change), so
+    // the wave reached must be recorded here, while `sim` still exists.
     destroy() {
+      recordProgress();
       teardownGame();
     },
   };

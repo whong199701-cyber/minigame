@@ -130,11 +130,37 @@ function fortressLayout(): Pos[] {
 }
 
 /**
- * Turtle · 144 tiles · 5 layers: the classic turtle rotated to portrait and compacted for phones —
- * the head / tail tiles are tucked into the wing notches and the top is a two-tile crown, so the
- * bounding box is 8 × 12 tiles instead of 8 × 15 (≈ 25 % larger tiles on a phone).
+ * The classic turtle · 144 tiles · 5 layers · 15 × 8 tiles: an 87-tile base (rows of 12 / 8 / 10 / 12 /
+ * 12 / 10 / 8 / 12, one tile on the left and two on the right sitting half a row down), a 6 × 6, 4 × 4
+ * and 2 × 2 tower and a single crowning tile.
  */
-function turtleLayout(): Pos[] {
+function classicTurtleLayout(): Pos[] {
+  const rows: [number, number][] = [
+    [1, 12],
+    [3, 10],
+    [2, 11],
+    [1, 12],
+    [1, 12],
+    [2, 11],
+    [3, 10],
+    [1, 12],
+  ];
+  const out: Pos[] = [];
+  rows.forEach(([c0, c1], r) => {
+    for (let c = c0; c <= c1; c++) out.push({ x: c * 2, y: r * 2, z: 0 });
+  });
+  out.push({ x: 0, y: 7, z: 0 }, { x: 26, y: 7, z: 0 }, { x: 28, y: 7, z: 0 });
+  out.push(...block(8, 2, 6, 6, 1), ...block(10, 4, 4, 4, 2), ...block(12, 6, 2, 2, 3), { x: 13, y: 7, z: 4 });
+  return out;
+}
+
+/**
+ * Portrait turtle · 144 tiles · 5 layers: the turtle rotated to portrait and compacted for phones —
+ * the head / tail tiles are tucked into the wing notches and the top is a two-tile crown, so the
+ * bounding box is 8 × 12 tiles. Dealt instead of the classic turtle only where the classic one would
+ * get unusably small tiles (portrait phones); see `boardFor`.
+ */
+function portraitTurtleLayout(): Pos[] {
   const spans: [number, number][] = [
     [1, 12],
     [3, 10],
@@ -157,13 +183,39 @@ function turtleLayout(): Pos[] {
   return out;
 }
 
+/**
+ * A concrete board. Each mode has one, except `large` (the turtle), which has the classic 15 × 8 turtle
+ * (`largeClassic`) and a portrait re-shaping of it (`large`). Best times are kept per board.
+ */
+export type BoardId = LayoutId | 'largeClassic';
+
+/** The default board of each mode (`large` = the portrait turtle, see BOARDS.largeClassic). */
 export const LAYOUTS: Record<LayoutId, Pos[]> = {
   small: pyramidLayout(),
   medium: fortressLayout(),
-  large: turtleLayout(),
+  large: portraitTurtleLayout(),
 };
 
+export const BOARDS: Record<BoardId, Pos[]> = { ...LAYOUTS, largeClassic: classicTurtleLayout() };
+
 export const LAYOUT_IDS: LayoutId[] = ['small', 'medium', 'large'];
+export const BOARD_IDS: BoardId[] = ['small', 'medium', 'large', 'largeClassic'];
+
+/** Tiles at least this wide are comfortable to read and tap. */
+export const COMFORT_TILE_W = 40;
+
+/**
+ * The board to deal for a mode in a play area of availW × availH CSS px. The large mode is the classic
+ * turtle wherever it gets comfortable tiles or at least tiles as big as the portrait turtle would
+ * (landscape phones, tablets, desktop); on portrait phones, where the 15-tile-wide classic turtle would
+ * only get ~24 px tiles, the portrait turtle is dealt instead.
+ */
+export function boardFor(mode: LayoutId, availW: number, availH: number, pad = 6): BoardId {
+  if (mode !== 'large') return mode;
+  const classic = computeMetrics(layoutBounds(BOARDS.largeClassic), availW, availH, pad).w;
+  const portrait = computeMetrics(layoutBounds(BOARDS.large), availW, availH, pad).w;
+  return classic >= Math.min(COMFORT_TILE_W, portrait) ? 'largeClassic' : 'large';
+}
 
 export function overlapsXY(a: Pos, b: Pos): boolean {
   return Math.abs(a.x - b.x) < 2 && Math.abs(a.y - b.y) < 2;
@@ -432,28 +484,95 @@ export function generateBoard(positions: readonly Pos[], rand: () => number = Ma
 }
 
 /**
- * Re-deal the remaining tiles' kinds in place (ids / positions preserved) so that the rest of the
- * game is solvable again. Falls back to a plain permutation if pairing is impossible.
+ * Exact search: can these positions be emptied two FREE tiles at a time, whatever kinds they carry?
+ * Depth-first over pair removals with a memo of dead positions. Returns a removal order (index pairs),
+ * null when no order exists, or undefined when `budget` search nodes were not enough to decide.
  */
-export function reshuffle(tiles: readonly Tile[], rand: () => number = Math.random): Board {
+export function findClearOrder(pos: readonly Pos[], budget = 20000): [number, number][] | null | undefined {
+  const n = pos.length;
+  if (n % 2 !== 0) return null;
+  const g = buildGraph(pos);
+  const above: number[][] = Array.from({ length: n }, () => []);
+  for (let i = 0; i < n; i++) for (const j of g.below[i]) above[j].push(i);
+  const present = new Uint8Array(n).fill(1);
+  const dead = new Set<string>();
+  const order: [number, number][] = [];
+  let nodes = 0;
+  let outOfBudget = false;
+  const anyPresent = (list: number[]): boolean => {
+    for (const j of list) if (present[j]) return true;
+    return false;
+  };
+  const freeNow = (): number[] => {
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) {
+      if (!present[i] || anyPresent(above[i])) continue;
+      if (anyPresent(g.leftN[i]) && anyPresent(g.rightN[i])) continue;
+      out.push(i);
+    }
+    return out;
+  };
+  const dfs = (left: number): boolean => {
+    if (left === 0) return true;
+    if (++nodes > budget) {
+      outOfBudget = true;
+      return false;
+    }
+    const key = present.join('');
+    if (dead.has(key)) return false;
+    const f = freeNow();
+    for (let a = 0; a < f.length; a++) {
+      for (let b = a + 1; b < f.length; b++) {
+        present[f[a]] = 0;
+        present[f[b]] = 0;
+        order.push([f[a], f[b]]);
+        if (dfs(left - 2)) return true;
+        order.pop();
+        present[f[a]] = 1;
+        present[f[b]] = 1;
+        if (outOfBudget) return false;
+      }
+    }
+    dead.add(key);
+    return false;
+  };
+  if (dfs(n)) return order;
+  return outOfBudget ? undefined : null;
+}
+
+/** Positions up to this count are decided by the exact search before trying the random reverse fill. */
+const EXACT_RESHUFFLE_MAX = 24;
+
+/**
+ * Re-deal the remaining tiles' kinds in place (ids / positions preserved) so that the rest of the
+ * game is solvable again. Returns null when no re-deal can help: the remaining positions cannot be
+ * emptied in any order (e.g. two tiles stacked on each other), or the kinds cannot be paired.
+ */
+export function reshuffle(tiles: readonly Tile[], rand: () => number = Math.random): Board | null {
   if (!tiles.length) return { tiles: [], solution: [] };
   const positions = tiles.map((t) => ({ x: t.x, y: t.y, z: t.z }));
   const pairs = pairsFromKinds(
     tiles.map((t) => t.kind),
     rand,
   );
-  const board = pairs ? buildBoard(positions, pairs, rand) : null;
-  if (board) {
-    // map back to original ids
-    const mapped = board.tiles.map((t, i) => ({ ...t, id: tiles[i].id }));
-    const solution = board.solution.map(([a, b]) => [tiles[a].id, tiles[b].id] as [number, number]);
-    return { tiles: mapped, solution };
+  if (!pairs) return null;
+  let board: Board | null = null;
+  if (positions.length > EXACT_RESHUFFLE_MAX) board = buildBoard(positions, pairs, rand, 60);
+  if (!board) {
+    const order = findClearOrder(positions, positions.length > EXACT_RESHUFFLE_MAX ? 20000 : 200000);
+    if (!order) return null;
+    const dealt: Tile[] = positions.map((p, i) => ({ id: i, x: p.x, y: p.y, z: p.z, kind: -1 }));
+    order.forEach(([i, j], p) => {
+      dealt[i].kind = pairs[p][0];
+      dealt[j].kind = pairs[p][1];
+    });
+    if (!replaySolver(dealt, order)) return null;
+    board = { tiles: dealt, solution: order };
   }
-  const kinds = shuffleInPlace(
-    tiles.map((t) => t.kind),
-    rand,
-  );
-  return { tiles: tiles.map((t, i) => ({ ...t, kind: kinds[i] })), solution: [] };
+  // map back to the original ids
+  const mapped = board.tiles.map((t, i) => ({ ...t, id: tiles[i].id }));
+  const solution = board.solution.map(([a, b]) => [tiles[a].id, tiles[b].id] as [number, number]);
+  return { tiles: mapped, solution };
 }
 
 /** Replays a recorded pair order; true when every pair was free + matching and the board ends empty. */
@@ -493,7 +612,7 @@ export interface Metrics {
 }
 
 export const TILE_ASPECT = 1.2;
-export const LIFT_RATIO = 0.09;
+export const LIFT_RATIO = 0.12;
 
 /** Fit the layout into the available area (CSS px), centred. */
 export function computeMetrics(b: Bounds, availW: number, availH: number, pad = 8, maxTileW = 84): Metrics {
@@ -554,13 +673,18 @@ export function hitTest<T extends Pos>(tiles: readonly T[], px: number, py: numb
   return null;
 }
 
-/** Like hitTest but tolerant: falls back to the nearest free tile within `slop` px of the point. */
+/**
+ * Like hitTest, but forgiving towards FREE tiles (the only ones that can be played): when the finger
+ * lands on nothing, or on a blocked tile within `slop` px of a free tile's face, the nearest such free
+ * tile wins. A tap well inside a blocked tile still returns that blocked tile.
+ */
 export function hitTestTolerant(tiles: readonly Tile[], px: number, py: number, m: Metrics, slop = 6): Tile | null {
   const exact = hitTest(tiles, px, py, m);
-  if (exact) return exact;
+  const free = freeTiles(tiles);
+  if (exact && free.includes(exact)) return exact;
   let best: Tile | null = null;
   let bestD = slop;
-  for (const t of freeTiles(tiles)) {
+  for (const t of free) {
     const r = tileRect(t, m);
     const dx = Math.max(r.x - px, 0, px - (r.x + r.w));
     const dy = Math.max(r.y - py, 0, py - (r.y + r.h));
@@ -570,5 +694,5 @@ export function hitTestTolerant(tiles: readonly Tile[], px: number, py: number, 
       best = t;
     }
   }
-  return best;
+  return best ?? exact;
 }

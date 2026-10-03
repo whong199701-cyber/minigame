@@ -1,0 +1,132 @@
+/* Bridges (hashi) — every class is prefixed with .hs- */
+
+.hs-start {
+  gap: 12px;
+}
+.hs-tagline {
+  max-width: 300px;
+  font-size: 15px;
+}
+.hs-desc {
+  font-size: 14px;
+  min-height: 20px;
+}
+.hs-best {
+  min-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.hs-start-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.hs-start-actions .btn-primary {
+  min-width: 180px;
+}
+.hs-start-actions .btn-secondary {
+  min-width: 150px;
+  min-height: 44px;
+}
+.hs-saved {
+  min-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.hs-tip-start {
+  max-width: 300px;
+}
+
+.hs-game {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hs-hud {
+  padding: 6px 14px 2px;
+}
+.hs-hud .stat {
+  min-width: 72px;
+}
+.hs-hud .stat-value {
+  font-size: 17px;
+  transition: color 0.2s ease;
+}
+.hs-hud .stat-value.hs-done {
+  color: var(--success);
+}
+.hs-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.hs-footer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 14px 10px;
+}
+.hs-tip {
+  font-size: 12px;
+  text-align: center;
+  max-width: 360px;
+}
+.hs-buttons {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.hs-buttons .btn {
+  min-width: 136px;
+  min-height: 44px;
+}
+
+.hs-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hs-result .hs-big {
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 4px;
+}
+.hs-good {
+  color: var(--success);
+  font-weight: 600;
+}
+.hs-record {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+/* Short landscape screens (phones on their side): move HUD and buttons to the sides so the board
+   keeps as much height as possible. */
+@media (orientation: landscape) and (max-height: 520px) {
+  .hs-game {
+    flex-direction: row;
+  }
+  .hs-hud {
+    flex-direction: column;
+    justify-content: center;
+    gap: 14px;
+    padding: 8px 4px 8px calc(10px + var(--sal));
+  }
+  .hs-footer {
+    justify-content: center;
+    padding: 8px calc(12px + var(--sar)) 8px 4px;
+  }
+  .hs-tip {
+    display: none;
+  }
+  .hs-buttons {
+    flex-direction: column;
+  }
+  .hs-buttons .btn {
+    min-width: 150px;
+  }
+}

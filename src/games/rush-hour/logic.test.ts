@@ -7,8 +7,10 @@ import {
   SIZE,
   SPECS,
   applyMove,
+  bankPuzzle,
   bankSize,
   bestMove,
+  boardSignature,
   canMove,
   cellsOf,
   decodePuzzle,
@@ -16,9 +18,10 @@ import {
   encodePuzzle,
   encodeState,
   evaluateLayout,
+  DistanceExplorer,
   exploreDistances,
   fillGrid,
-  generateOnline,
+  finishRemix,
   getPuzzle,
   hasOverlap,
   hashSeed,
@@ -29,6 +32,8 @@ import {
   pathFromDistances,
   pickStateAt,
   randomLayout,
+  remixPlan,
+  remixPuzzle,
   searchPuzzle,
   slideRange,
   solve,
@@ -41,6 +46,7 @@ import {
 import { seededRandom } from '../../app/canvas';
 
 const red: Vehicle = { id: 0, horiz: true, len: 2, lane: EXIT_ROW };
+const pair = (p: { vehicles: Vehicle[]; start: number[] }): [Vehicle[], number[]] => [p.vehicles, p.start];
 
 /** Red at col 0, one vertical car (rows 2-3) in column 3 blocking the way: 2 moves. */
 const simple = {
@@ -178,8 +184,9 @@ describe('solver', () => {
     expect(exploreDistances(unsolvable.vehicles, unsolvable.start)).toBeNull();
   });
   it('honours the state cap', () => {
-    const p = generateOnline('easy', 1);
+    const p = getPuzzle('easy', 1);
     expect(solve(p.vehicles, p.start, 1)).toBeNull();
+    expect(exploreDistances(p.vehicles, p.start, 5)).toBeNull();
   });
   it('distance map agrees with BFS and yields optimal paths', () => {
     const dist = exploreDistances(threeMover.vehicles, threeMover.start)!;
@@ -207,6 +214,38 @@ describe('solver', () => {
     }
     expect(nextMove([red], [GOAL_POS], null)).toBeNull();
     expect(nextMove(unsolvable.vehicles, unsolvable.start, null)).toBeNull();
+  });
+});
+
+describe('sliced distance exploration', () => {
+  it('gives the same map however it is sliced', () => {
+    const p = getPuzzle('hard', 34);
+    const whole = exploreDistances(p.vehicles, p.start)!;
+    expect(whole).not.toBeNull();
+    const ex = new DistanceExplorer(p.vehicles, p.start);
+    let slices = 0;
+    while (!ex.step(97)) slices++;
+    expect(slices).toBeGreaterThan(10);
+    expect(ex.done).toBe(true);
+    const sliced = ex.result!;
+    expect(sliced.size).toBe(whole.size);
+    expect([...sliced.entries()]).toEqual([...whole.entries()]);
+    expect(sliced.get(encodeState(p.start))).toBe(p.par);
+    // Further steps are no-ops.
+    expect(ex.step(10)).toBe(true);
+    expect(ex.result).toBe(sliced);
+  });
+  it('is not done before the work is finished and reports failures as null', () => {
+    const ex = new DistanceExplorer(threeMover.vehicles, threeMover.start);
+    expect(ex.done).toBe(false);
+    expect(ex.result).toBeNull();
+    expect(ex.step(1)).toBe(false);
+    expect(ex.run()?.get(encodeState(threeMover.start))).toBe(3);
+    const bad = new DistanceExplorer(unsolvable.vehicles, unsolvable.start);
+    expect(bad.run()).toBeNull();
+    expect(bad.done).toBe(true);
+    const capped = new DistanceExplorer(threeMover.vehicles, threeMover.start, 3);
+    expect(capped.run()).toBeNull();
   });
 });
 
@@ -248,24 +287,6 @@ describe('generation', () => {
       expect(targetPar(d, 1)).toBe(SPECS[d].minPar);
     }
   });
-  it('generateOnline gives solvable easy/medium levels with par in range, deterministically', () => {
-    for (const d of ['easy', 'medium'] as Difficulty[]) {
-      const spec = SPECS[d];
-      for (let lv = 1; lv <= 4; lv++) {
-        const p = generateOnline(d, lv);
-        expect(isValidLayout(p.vehicles, p.start)).toBe(true);
-        expect(p.vehicles.length - 1).toBeGreaterThanOrEqual(spec.minVehicles);
-        expect(p.vehicles.length - 1).toBeLessThanOrEqual(spec.maxVehicles);
-        expect(p.par).toBeGreaterThanOrEqual(spec.minPar);
-        expect(p.par).toBeLessThanOrEqual(spec.maxPar);
-        expect(solve(p.vehicles, p.start)?.par).toBe(p.par);
-        const again = generateOnline(d, lv);
-        expect(again.start).toEqual(p.start);
-        expect(again.vehicles).toEqual(p.vehicles);
-      }
-      expect(generateOnline(d, 1).start).not.toEqual(generateOnline(d, 2).start);
-    }
-  }, 30000);
   it('searchPuzzle hill-climbs to a verified par', () => {
     const r = searchPuzzle(hashSeed('hard', 999), SPECS.hard, 12, { iterations: 40 })!;
     expect(r).not.toBeNull();
@@ -285,6 +306,13 @@ describe('puzzle codes', () => {
     expect(dec.par).toBe(3);
     expect(dec.vehicles).toEqual(threeMover.vehicles);
     expect(dec.start).toEqual(threeMover.start);
+  });
+  it('boardSignature ignores vehicle order but not positions', () => {
+    const swapped = [threeMover.vehicles[0], { ...threeMover.vehicles[2], id: 1 }, { ...threeMover.vehicles[1], id: 2 }];
+    const swappedStart = [threeMover.start[0], threeMover.start[2], threeMover.start[1]];
+    expect(boardSignature(swapped, swappedStart)).toBe(boardSignature(threeMover.vehicles, threeMover.start));
+    expect(boardSignature(threeMover.vehicles, [0, 0, 3])).not.toBe(boardSignature(threeMover.vehicles, threeMover.start));
+    expect(boardSignature(threeMover.vehicles, [1, 1, 3])).not.toBe(boardSignature(threeMover.vehicles, threeMover.start));
   });
   it('rejects corrupt codes', () => {
     expect(() => decodePuzzle('3:h220v34')).toThrow(); // truncated
@@ -319,14 +347,107 @@ describe('level bank', () => {
       }
     }, 120000);
   }
-  it('falls back to online generation beyond the bank', () => {
-    const lv = bankSize('easy') + 1;
-    const p = getPuzzle('easy', lv);
+  it('every bank level is a distinct board, even ignoring vehicle colours', () => {
+    for (const d of DIFFICULTIES) {
+      const seen = new Map<string, number>();
+      for (let lv = 1; lv <= bankSize(d); lv++) {
+        const p = bankPuzzle(d, lv)!;
+        expect(p).not.toBeNull();
+        expect(p.tint).toBe(0);
+        const sig = boardSignature(p.vehicles, p.start);
+        expect(seen.get(sig), `${d} ${lv}`).toBeUndefined();
+        seen.set(sig, lv);
+      }
+      expect(bankPuzzle(d, bankSize(d) + 1)).toBeNull();
+      expect(bankPuzzle(d, 0)).toBeNull();
+    }
+  });
+});
+
+describe('levels beyond the bank (remix)', () => {
+  /** Asserts the brief's guarantees for a generated level. */
+  const checkLevel = (d: Difficulty, lv: number) => {
+    const spec = SPECS[d];
+    const p = getPuzzle(d, lv);
     expect(p.fromBank).toBe(false);
     expect(p.level).toBe(lv);
+    expect(p.difficulty).toBe(d);
+    expect(isValidLayout(p.vehicles, p.start)).toBe(true);
+    expect(isSolved(p.start)).toBe(false);
+    expect(p.vehicles.length - 1).toBeGreaterThanOrEqual(spec.minVehicles);
+    expect(p.vehicles.length - 1).toBeLessThanOrEqual(spec.maxVehicles);
+    expect(p.par, `${d} ${lv}`).toBeGreaterThanOrEqual(spec.minPar);
+    expect(p.par, `${d} ${lv}`).toBeLessThanOrEqual(spec.maxPar);
     expect(solve(p.vehicles, p.start)?.par).toBe(p.par);
-    expect(p.par).toBeGreaterThanOrEqual(SPECS.easy.minPar);
+    expect(p.tint).toBeGreaterThanOrEqual(1);
+    expect(p.tint).toBeLessThanOrEqual(12);
+    return p;
+  };
+
+  for (const d of DIFFICULTIES) {
+    it(`${d}: a full round of remixes stays in range and never repeats a board`, () => {
+      const n = bankSize(d);
+      const bankSigs = new Set<string>();
+      for (let lv = 1; lv <= n; lv++) {
+        const b = getPuzzle(d, lv);
+        bankSigs.add(boardSignature(b.vehicles, b.start));
+      }
+      const seen = new Set<string>();
+      const lots = new Set<number>();
+      // One round covers every distinct lot of the bank exactly once.
+      let lv = n + 1;
+      for (; ; lv++) {
+        const plan = remixPlan(d, lv);
+        if (plan.earlier.length > 0) break;
+        expect(lots.has(plan.baseLevel)).toBe(false);
+        lots.add(plan.baseLevel);
+        const p = checkLevel(d, lv);
+        const sig = boardSignature(p.vehicles, p.start);
+        expect(bankSigs.has(sig), `${d} ${lv} repeats a bank level`).toBe(false);
+        expect(seen.has(sig), `${d} ${lv} repeats a remix`).toBe(false);
+        seen.add(sig);
+      }
+      expect(lots.size).toBeGreaterThanOrEqual(Math.floor(n * 0.6));
+      // The next round reuses the lots in another order and remembers earlier boards.
+      const plan = remixPlan(d, lv);
+      expect(plan.earlier).toHaveLength(1);
+      expect(remixPlan(d, plan.earlier[0]).baseLevel).toBe(plan.baseLevel);
+      const p = checkLevel(d, lv);
+      expect(boardSignature(p.vehicles, p.start)).not.toBe(boardSignature(...pair(getPuzzle(d, plan.earlier[0]))));
+      // Far-away levels still honour the range.
+      checkLevel(d, n * 3 + 7);
+      checkLevel(d, 1000);
+    }, 120000);
+  }
+
+  it('is deterministic and independent of how the exploration is sliced', () => {
+    for (const [d, lv] of [
+      ['expert', 81],
+      ['expert', 85],
+      ['hard', 81],
+      ['medium', 61],
+    ] as [Difficulty, number][]) {
+      const a = remixPuzzle(d, lv);
+      const b = getPuzzle(d, lv);
+      expect(b).toEqual(a);
+      const plan = remixPlan(d, lv);
+      const ex = new DistanceExplorer(plan.vehicles, plan.baseStart);
+      while (!ex.step(53));
+      expect(finishRemix(plan, ex.result)).toEqual(a);
+      // The explored map is the hint map of the generated level.
+      expect(ex.result!.get(encodeState(a.start))).toBe(a.par);
+      expect(pathFromDistances(a.vehicles, a.start, ex.result!)).toHaveLength(a.par);
+    }
+    expect(getPuzzle('expert', 81).start).not.toEqual(getPuzzle('expert', 82).start);
   }, 30000);
+
+  it('falls back to the bank start when the lot cannot be explored', () => {
+    const plan = remixPlan('expert', 90);
+    const p = finishRemix(plan, null);
+    expect(p.start).toEqual(plan.baseStart);
+    expect(p.par).toBe(plan.basePar);
+    expect(p.par).toBeGreaterThanOrEqual(SPECS.expert.minPar);
+  });
 });
 
 describe('scoring', () => {
@@ -336,5 +457,11 @@ describe('scoring', () => {
     expect(stars(13, 10)).toBe(2);
     expect(stars(14, 10)).toBe(1);
     expect(stars(5, 10)).toBe(3);
+  });
+  it('caps hinted solves at two stars', () => {
+    expect(stars(10, 10, true)).toBe(2);
+    expect(stars(13, 10, true)).toBe(2);
+    expect(stars(14, 10, true)).toBe(1);
+    expect(stars(10, 10, false)).toBe(3);
   });
 });

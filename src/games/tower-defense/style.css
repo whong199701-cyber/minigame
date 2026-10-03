@@ -1,7 +1,24 @@
 /* Mini Tower Defense — all classes prefixed with .td- */
 
+/* ── Start screen ─────────────────────────────────────────────────────── */
+.td-start {
+  gap: 12px;
+  padding: 16px 20px;
+  min-height: 0;
+  overflow-y: auto;
+  justify-content: center;
+  justify-content: safe center;
+}
+/* Columns only matter in short landscape; in portrait their children flow in the single column. */
+.td-start-col {
+  display: contents;
+}
+.td-start .big-icon {
+  font-size: 56px;
+}
 .td-start-desc {
   max-width: 320px;
+  line-height: 1.35;
 }
 .td-maps {
   display: flex;
@@ -56,51 +73,58 @@
   font-size: 12px;
   color: var(--success);
 }
+.td-map-cleared[hidden] {
+  display: none;
+}
+.td-best {
+  min-height: 20px;
+}
+.td-play {
+  min-width: 180px;
+}
 
-/* HUD */
-.td-hud {
-  padding: 6px 10px 4px;
-  gap: 6px;
-}
-.td-hud .stat {
-  min-width: 0;
+/* ── Game layout ──────────────────────────────────────────────────────── */
+.td-game {
   flex: 1;
-}
-.td-hud .stat-value {
-  font-size: 17px;
-  line-height: 1.15;
-  white-space: nowrap;
-}
-.td-hud .stat-label {
-  white-space: nowrap;
-}
-.td-hud-btns {
+  min-height: 0;
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+}
+
+/* HUD: one compact line so the board keeps as much height as possible. */
+.td-hud {
   flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 10px;
+  padding: 6px 12px 2px;
+  min-height: 34px;
+  font-variant-numeric: tabular-nums;
 }
-.td-hudbtn {
-  min-width: 46px;
-  min-height: 44px;
-  padding: 0 8px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text);
-  font: inherit;
+.td-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  min-width: 0;
+}
+.td-stat-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.td-stat-icon {
   font-size: 15px;
+  line-height: 1;
+}
+.td-stat-value {
+  font-size: 18px;
   font-weight: 700;
-  cursor: pointer;
+  line-height: 1.2;
 }
-.td-hudbtn.active {
-  background: var(--accent);
-  color: var(--accent-text);
-  border-color: var(--accent);
-}
-.td-hudbtn:active {
-  transform: scale(0.95);
-}
-.td-lives-low .stat-value {
+.td-lives-low .td-stat-value {
   color: var(--danger);
 }
 
@@ -109,63 +133,102 @@
   flex: 1;
   min-height: 0;
   position: relative;
-  /* Menus may extend past the board on very short (landscape) viewports. */
-  overflow: visible;
 }
 .td-area canvas {
   touch-action: none;
 }
 
-/* Bottom controls */
+/* Bottom controls: speed toggle + wave button (with the next-wave preview as its second line). */
 .td-controls {
   flex: none;
-  padding: 6px 12px 10px;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   align-items: stretch;
+  padding: 6px 12px 10px;
+}
+.td-speed {
+  flex: none;
+  width: 56px;
+  min-height: 52px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.td-speed.active {
+  border-color: var(--warning);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 16%, var(--surface-2));
+}
+.td-speed:active {
+  transform: scale(0.95);
+}
+.td-wave-btn {
+  flex: 1;
+  min-width: 0;
+  min-height: 52px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+}
+.td-wave-btn:disabled {
+  opacity: 1;
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--muted);
+}
+.td-wave-label {
+  font-size: 16px;
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .td-preview {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--muted);
-  min-height: 18px;
-  line-height: 18px;
+  gap: 8px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 14px;
+  opacity: 0.92;
+  max-width: 100%;
+  overflow: hidden;
+}
+.td-preview[hidden] {
+  display: none;
 }
 .td-preview-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
 .td-dot {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   display: inline-block;
   flex: none;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
 }
 .td-dot.flying {
   border-radius: 2px;
   transform: rotate(45deg);
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
 }
 .td-dot.boss {
-  width: 13px;
-  height: 13px;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 40%, transparent);
-}
-.td-wave-btn {
-  width: 100%;
-  min-height: 48px;
-  font-size: 16px;
+  width: 11px;
+  height: 11px;
 }
 
-/* Context menu (build / tower) */
+/* ── Context menu (build / tower) ─────────────────────────────────────── */
 .td-menu {
   position: absolute;
   z-index: 7;
@@ -200,6 +263,10 @@
 }
 .td-menu-title .muted {
   font-weight: 500;
+}
+.td-menu-money {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 .td-menu-grid {
   display: grid;
@@ -255,6 +322,15 @@
   color: var(--muted);
   text-align: center;
 }
+.td-stats > div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 2px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
 .td-stats b {
   display: block;
   color: var(--text);
@@ -264,6 +340,7 @@
 .td-stats .up {
   color: var(--success);
   font-size: 10px;
+  min-height: 12px;
 }
 .td-menu-row {
   display: flex;
@@ -286,58 +363,10 @@
   font-size: 12px;
 }
 
-/* Pause overlay */
+/* ── Pause overlay ────────────────────────────────────────────────────── */
 .td-pause {
   z-index: 6;
 }
-.td-pause .btn {
-  min-width: 160px;
-}
-
-/* Start screen additions */
-.td-start {
-  gap: 12px;
-  padding: 16px 20px;
-}
-.td-start .big-icon {
-  font-size: 56px;
-}
-.td-start-desc {
-  max-width: 320px;
-  line-height: 1.35;
-}
-.td-best {
-  min-height: 20px;
-}
-.td-play {
-  min-width: 180px;
-}
-.td-map-cleared[hidden] {
-  display: none;
-}
-
-/* Menu money label */
-.td-menu-money {
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-}
-.td-menu .td-target-btn {
-  width: 100%;
-}
-.td-stats > div {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-  padding: 4px 2px;
-  border-radius: 8px;
-  background: var(--surface-2);
-}
-.td-stats .up {
-  min-height: 12px;
-}
-
-/* Pause overlay */
 .td-pause-icon {
   font-size: 40px;
   line-height: 1;
@@ -347,4 +376,63 @@
 }
 .td-pause .btn {
   min-width: 180px;
+}
+
+/* ── Short landscape screens (phones on their side) ───────────────────── */
+@media (orientation: landscape) and (max-height: 540px) {
+  .td-start {
+    flex-direction: row;
+    align-items: center;
+    gap: 28px;
+    padding: 12px calc(20px + var(--sar)) 12px calc(20px + var(--sal));
+  }
+  .td-start-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 0 1 360px;
+  }
+  .td-start .big-icon {
+    display: none;
+  }
+
+  /* Board on the left (drawn rotated by the game when that gives bigger cells), side panel on the right. */
+  .td-game {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 236px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  .td-area {
+    grid-column: 1;
+    grid-row: 1 / 4;
+    margin-left: var(--sal);
+  }
+  .td-hud {
+    grid-column: 2;
+    grid-row: 1;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 12px calc(12px + var(--sar)) 4px 6px;
+  }
+  .td-controls {
+    grid-column: 2;
+    grid-row: 3;
+    flex-direction: column;
+    padding: 6px calc(12px + var(--sar)) 10px 6px;
+  }
+  .td-speed {
+    width: 100%;
+    min-height: 44px;
+  }
+  .td-pause {
+    gap: 8px;
+    padding: 12px;
+  }
+  .td-pause-icon,
+  .td-pause-hint {
+    display: none;
+  }
 }

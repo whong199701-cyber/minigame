@@ -4,27 +4,40 @@ import {
   DIFFICULTIES,
   EMPTY,
   HIDDEN,
+  HINT_PENALTY,
+  MISTAKE_PENALTY,
+  SQRT3,
   applyDeduction,
   applyMark,
   buildConstraints,
   buildGrid,
   carveHoles,
   cellCenter,
+  cellRect,
+  chooseBannerSide,
   findDeduction,
   generatePuzzle,
+  hexPoints,
+  hintFocus,
+  hintKind,
   initialState,
   insideHex,
   isComplete,
+  isNonTrivial,
   isSolvable,
   layoutGrid,
   makePuzzle,
   minimizeGivens,
   mulberry32,
   neighborCoords,
+  orderForHint,
   pickCell,
+  puzzleDepth,
   remainingBlue,
   solve,
   solvePass,
+  totalTime,
+  type Deduction,
   type Difficulty,
   type Puzzle,
 } from './logic';
@@ -386,5 +399,280 @@ describe('minimizeGivens keep floor', () => {
         expect(p.given.filter(Boolean).length).toBeGreaterThanOrEqual(Math.min(DIFFICULTIES[d].minGivens, 3));
       }
     }
+  });
+});
+
+/**
+ * Every assignment of the hidden cells that matches what the player can see: each revealed number, the cells
+ * already marked blue and the total blue count. Brute force, so only for small boards.
+ */
+function consistentAssignments(p: Puzzle, s: Uint8Array): boolean[][] {
+  const hidden: number[] = [];
+  for (let i = 0; i < s.length; i++) if (s[i] === HIDDEN) hidden.push(i);
+  const out: boolean[][] = [];
+  const blue = new Array<boolean>(s.length).fill(false);
+  for (let i = 0; i < s.length; i++) if (s[i] === BLUE) blue[i] = true;
+  for (let mask = 0; mask < 1 << hidden.length; mask++) {
+    hidden.forEach((id, k) => (blue[id] = ((mask >> k) & 1) === 1));
+    if (blue.filter(Boolean).length !== p.totalBlue) continue;
+    let ok = true;
+    for (let id = 0; id < s.length && ok; id++) {
+      if (s[id] !== EMPTY) continue;
+      if (p.neighbors[id].filter((n) => blue[n]).length !== p.clue[id]) ok = false;
+    }
+    if (ok) out.push(blue.slice());
+  }
+  return out;
+}
+
+describe('solver soundness (exhaustive on small boards)', () => {
+  it('every deduction holds in every assignment consistent with the visible clues', () => {
+    const rng = mulberry32(2024);
+    let checked = 0;
+    for (let trial = 0; trial < 260; trial++) {
+      const cols = 3 + Math.floor(rng() * 2); // 3–4
+      const rows = 3 + Math.floor(rng() * 2); // 3–4
+      const exists = carveHoles(cols, rows, rng() < 0.5 ? 0 : 0.15, rng);
+      const { cells } = buildGrid(cols, rows, (c, r) => exists[c][r]);
+      const n = cells.length;
+      const blue = cells.map(() => rng() < 0.3);
+      const p = makePuzzle(cols, rows, exists, blue, new Array<boolean>(n).fill(false));
+      // A truthful partial state: some empties revealed, some blues marked, at most 12 cells hidden.
+      const s = new Uint8Array(n);
+      const order = cells.map((c) => c.id).sort(() => rng() - 0.5);
+      let hidden = n;
+      for (const id of order) {
+        if (hidden <= 12 && rng() < 0.55) continue;
+        s[id] = blue[id] ? BLUE : EMPTY;
+        hidden--;
+      }
+      if (hidden === 0) continue;
+      const worlds = consistentAssignments(p, s);
+      expect(worlds.length).toBeGreaterThan(0); // the truth is always one of them
+      for (const level of ['basic', 'advanced'] as const) {
+        for (const d of solvePass(p, s, level)) {
+          for (const id of d.cells) {
+            expect(s[id]).toBe(HIDDEN);
+            for (const w of worlds) expect(w[id]).toBe(d.blue);
+            checked++;
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(300);
+  });
+
+  it('every step of a full solve is forced by what is visible at that moment', () => {
+    let boards = 0;
+    for (let seed = 1; boards < 25 && seed < 400; seed++) {
+      const rng = mulberry32(seed);
+      const blue = new Array<boolean>(16).fill(false).map(() => rng() < 0.3);
+      const given = blue.map((b) => !b && rng() < 0.35);
+      if (!given.some(Boolean)) continue;
+      const p = makePuzzle(4, 4, null, blue, given);
+      if (!isSolvable(p, 'advanced')) continue;
+      const s = initialState(p);
+      while (!isComplete(s)) {
+        const d = findDeduction(p, s, 'advanced')!;
+        const worlds = consistentAssignments(p, s);
+        for (const id of d.cells) for (const w of worlds) expect(w[id]).toBe(d.blue);
+        applyDeduction(s, d); // revealed empties now show their numbers, as in play
+      }
+      expect(consistentAssignments(p, s)).toEqual([blue]);
+      boards++;
+    }
+    expect(boards).toBe(25);
+  });
+});
+
+describe('puzzleDepth', () => {
+  it('is 0 when single-clue rules finish the board', () => {
+    const p = puzzleFrom(3, 3, [[0, 0]], [[1, 1]]); // the 1 resolves its ring, the global count the rest
+    expect(puzzleDepth(p, 'basic')).toBe(0);
+  });
+  it('counts a needed subset step', () => {
+    const p = puzzleFrom(3, 2, [[1, 0]], [[0, 0], [1, 1]]);
+    expect(findDeduction(p, initialState(p), 'basic')!.rule).toBe('subset');
+    expect(puzzleDepth(p, 'basic')).toBeGreaterThanOrEqual(1);
+  });
+  it('is -1 for a board the solver cannot finish', () => {
+    // two symmetric blues around a lone 1: no rule can tell them apart
+    const p = puzzleFrom(2, 2, [[1, 0]], [[0, 0]]);
+    const s = initialState(p);
+    expect(solve(p, s.slice(), 'advanced')).toBe(false);
+    expect(puzzleDepth(p, 'advanced')).toBe(-1);
+  });
+  it('classifies deductions by how many constraints they combine', () => {
+    const one: Deduction = { cells: [1], blue: true, rule: 'saturated', sources: [0] };
+    const glob: Deduction = { cells: [1], blue: false, rule: 'global', sources: [-1] };
+    const two: Deduction = { cells: [1], blue: false, rule: 'global', sources: [3, -1] };
+    expect(isNonTrivial(one)).toBe(false);
+    expect(isNonTrivial(glob)).toBe(false);
+    expect(isNonTrivial(two)).toBe(true);
+  });
+  it('generated boards reach their difficulty\'s minimum depth', () => {
+    for (const d of ['easy', 'medium', 'hard'] as const) {
+      const cfg = DIFFICULTIES[d];
+      let sum = 0;
+      for (let seed = 200; seed < 210; seed++) {
+        const depth = puzzleDepth(generatePuzzle(d, seed), cfg.rules);
+        expect(depth).toBeGreaterThanOrEqual(cfg.minDepth);
+        sum += depth;
+      }
+      expect(sum / 10).toBeGreaterThanOrEqual(cfg.minDepth);
+    }
+    expect(DIFFICULTIES.hard.minDepth).toBeGreaterThan(DIFFICULTIES.medium.minDepth);
+    expect(DIFFICULTIES.medium.minDepth).toBeGreaterThan(DIFFICULTIES.easy.minDepth);
+  });
+  it('hard boards regularly need the advanced overlap rule', () => {
+    let needAdvanced = 0;
+    for (let seed = 300; seed < 312; seed++) {
+      const p = generatePuzzle('hard', seed);
+      expect(isSolvable(p, 'advanced')).toBe(true);
+      if (!isSolvable(p, 'basic')) needAdvanced++;
+    }
+    expect(needAdvanced).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('scoring', () => {
+  it('totalTime floors the clock once and adds whole-second penalties', () => {
+    expect(totalTime(21.6, 0, 0)).toBe(21);
+    expect(totalTime(21.999, 0, 0)).toBe(21);
+    expect(totalTime(0, 2, 1)).toBe(2 * HINT_PENALTY + MISTAKE_PENALTY);
+    expect(totalTime(59.5, 1, 2)).toBe(59 + HINT_PENALTY + 2 * MISTAKE_PENALTY);
+    expect(totalTime(-3, 0, 0)).toBe(0);
+    expect(Number.isInteger(totalTime(12.34, 1, 1))).toBe(true);
+  });
+  it('a mistake costs more than a hint, so guessing never beats asking', () => {
+    expect(MISTAKE_PENALTY).toBeGreaterThan(HINT_PENALTY);
+  });
+});
+
+describe('hint helpers', () => {
+  it('a satisfied 0 clue gets the "zero" wording, other rules keep theirs', () => {
+    const zero = puzzleFrom(3, 3, [[2, 2]], [[0, 0]]);
+    const d0 = findDeduction(zero, initialState(zero), 'basic')!;
+    expect(d0.rule).toBe('satisfied');
+    expect(hintKind(zero, d0)).toBe('zero');
+    const one = puzzleFrom(3, 3, [[1, 0]], [[1, 1]]);
+    const s1 = initialState(one);
+    s1[idOf(one, 1, 0)] = BLUE; // the 1 already has its blue
+    const d1 = findDeduction(one, s1, 'basic')!;
+    expect(d1.rule).toBe('satisfied');
+    expect(one.clue[d1.sources[0]]).toBe(1);
+    expect(hintKind(one, d1)).toBe('satisfied');
+    const sub = puzzleFrom(3, 2, [[1, 0]], [[0, 0], [1, 1]]);
+    expect(hintKind(sub, findDeduction(sub, initialState(sub), 'basic')!)).toBe('subset');
+  });
+  it('hintFocus lists the target, then the clues, then the other deduced cells (not for global)', () => {
+    const d: Deduction = { cells: [5, 6, 7], blue: false, rule: 'subset', sources: [2, 3] };
+    expect(hintFocus(d)).toEqual([5, 2, 3, 6, 7]);
+    const g: Deduction = { cells: [5, 6, 7], blue: false, rule: 'global', sources: [2, -1] };
+    expect(hintFocus(g)).toEqual([5, 2]);
+  });
+  it('orderForHint puts the deduced cell nearest the clue first (clue + global count can reach anywhere)', () => {
+    const p = puzzleFrom(4, 4, [[1, 0]], [[0, 0]]);
+    const g = solvePass(p, initialState(p), 'basic').find((d) => d.rule === 'global' && d.sources.length === 2)!;
+    const o = orderForHint(p, g);
+    expect(o.cells.slice().sort((a, b) => a - b)).toEqual(g.cells.slice().sort((a, b) => a - b));
+    expect(o.blue).toBe(g.blue);
+    expect(o.sources).toEqual(g.sources);
+    const src = cellCenter(0, 0, { size: 1, ox: 0, oy: 0 });
+    const dist = (id: number) => {
+      const c = cellCenter(p.cells[id].col, p.cells[id].row, { size: 1, ox: 0, oy: 0 });
+      return Math.hypot(c.x - src.x, c.y - src.y);
+    };
+    for (let i = 1; i < o.cells.length; i++) expect(dist(o.cells[i])).toBeGreaterThanOrEqual(dist(o.cells[i - 1]) - 1e-9);
+    expect(dist(o.cells[0])).toBeLessThan(dist(g.cells[0]));
+    // a pure global deduction (no clue) is left as it is
+    const none = puzzleFrom(3, 3, [], [[0, 0]]);
+    const pure = solvePass(none, initialState(none), 'basic').find((d) => d.rule === 'global')!;
+    expect(orderForHint(none, pure)).toBe(pure);
+  });
+  it('chooseBannerSide keeps the hint target visible', () => {
+    const r = (y0: number, y1: number, x0 = 100, x1 = 140) => ({ x0, y0, x1, y1 });
+    // target near the bottom → banner on top, and vice versa
+    expect(chooseBannerSide(390, 480, 374, 70, 8, [r(400, 440)])).toBe('top');
+    expect(chooseBannerSide(390, 480, 374, 70, 8, [r(20, 60)])).toBe('bottom');
+    // target in the middle but a source clue in the top band → bottom
+    expect(chooseBannerSide(390, 480, 374, 70, 8, [r(200, 240), r(30, 70)])).toBe('bottom');
+    // the target outweighs any number of other cells
+    expect(chooseBannerSide(390, 480, 374, 70, 8, [r(420, 460), r(20, 60), r(20, 60), r(20, 60)])).toBe('top');
+    // a narrow banner in a wide area avoids cells beside it either way; ties go away from the target
+    expect(chooseBannerSide(900, 480, 300, 70, 8, [r(20, 60, 10, 50)])).toBe('bottom');
+  });
+  it('no target under the chosen banner on real boards', () => {
+    for (const d of ['easy', 'medium', 'hard'] as const) {
+      const p = generatePuzzle(d, 77);
+      const L = layoutGrid(p, 390, 470, 10);
+      const s = initialState(p);
+      for (let step = 0; step < 400 && !isComplete(s); step++) {
+        const ded = orderForHint(p, findDeduction(p, s, DIFFICULTIES[d].rules)!);
+        const focus = hintFocus(ded);
+        const rects = focus.map((id) => cellRect(p.cells[id].col, p.cells[id].row, L, L.size * 1.1));
+        const bh = 74;
+        const side = chooseBannerSide(390, 470, 374, bh, 8, rects);
+        const y0 = side === 'top' ? 8 : 470 - 8 - bh;
+        const t = rects[0];
+        expect(t.y1 <= y0 || t.y0 >= y0 + bh).toBe(true);
+        applyMark(p, s, ded.cells[0], ded.blue);
+      }
+    }
+  });
+});
+
+describe('geometry: transposed layout for wide areas', () => {
+  it('keeps the upright layout for portrait boxes and flips for landscape ones', () => {
+    const p = generatePuzzle('hard', 5);
+    expect(layoutGrid(p, 390, 470, 10).flip).toBe(false);
+    const wide = layoutGrid(p, 600, 330, 10);
+    expect(wide.flip).toBe(true);
+    expect(wide.size).toBeGreaterThan(layoutGrid(p, 600, 330, 10, 44, false).size * 1.1);
+    expect(wide.size).toBeGreaterThan(16);
+  });
+  it('the flipped board fits in the box and neighbours stay √3·size apart', () => {
+    const p = generatePuzzle('hard', 6);
+    const L = layoutGrid(p, 620, 330, 10);
+    expect(L.flip).toBe(true);
+    for (const c of p.cells) {
+      const r = cellRect(c.col, c.row, L);
+      expect(r.x0).toBeGreaterThanOrEqual(10 - 1e-6);
+      expect(r.x1).toBeLessThanOrEqual(620 - 10 + 1e-6);
+      expect(r.y0).toBeGreaterThanOrEqual(10 - 1e-6);
+      expect(r.y1).toBeLessThanOrEqual(330 - 10 + 1e-6);
+      const a = cellCenter(c.col, c.row, L);
+      for (const n of p.neighbors[c.id]) {
+        const b = cellCenter(p.cells[n].col, p.cells[n].row, L);
+        expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeCloseTo(SQRT3 * L.size, 6);
+      }
+    }
+  });
+  it('pickCell and insideHex work on pointy-top hexes', () => {
+    const p = generatePuzzle('medium', 12);
+    const L = layoutGrid(p, 640, 320, 8);
+    expect(L.flip).toBe(true);
+    for (const c of p.cells) {
+      const { x, y } = cellCenter(c.col, c.row, L);
+      expect(pickCell(p, L, x, y)).toBe(c.id);
+      expect(pickCell(p, L, x, y + L.size * 0.5)).toBe(c.id); // along the long (vertical) axis
+      expect(pickCell(p, L, x + L.size * 0.5, y)).toBe(c.id);
+    }
+    expect(pickCell(p, L, 1, 1)).toBe(-1);
+    expect(insideHex(0, 9.9, 0, 0, 10, true)).toBe(true);
+    expect(insideHex(9.9, 0, 0, 0, 10, true)).toBe(false); // flat side is at √3/2·r ≈ 8.66
+    expect(insideHex(8.6, 0, 0, 0, 10, true)).toBe(true);
+  });
+  it('hexPoints flips flat-top vertices into pointy-top ones', () => {
+    const flat = hexPoints(0, 0, 10);
+    const pointy = hexPoints(0, 0, 10, true);
+    expect(flat[0][0]).toBeCloseTo(10);
+    expect(flat[0][1]).toBeCloseTo(0);
+    expect(pointy[0][0]).toBeCloseTo(0);
+    expect(pointy[0][1]).toBeCloseTo(10);
+    pointy.forEach(([x, y], i) => {
+      expect(x).toBeCloseTo(flat[i][1]);
+      expect(y).toBeCloseTo(flat[i][0]);
+    });
   });
 });

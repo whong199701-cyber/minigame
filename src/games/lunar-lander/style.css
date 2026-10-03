@@ -3,6 +3,9 @@
 /* ── Start screen ─────────────────────────────────────────────────────── */
 .ll-start {
   gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  justify-content: safe center;
 }
 .ll-desc {
   max-width: 320px;
@@ -48,6 +51,17 @@
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
+.ll-progress {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ll-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
 .ll-limits {
   max-width: 320px;
   line-height: 1.4;
@@ -73,6 +87,9 @@
 }
 .ll-hud .stat-value.ll-danger {
   color: var(--danger);
+}
+.ll-hud .stat-value.ll-ok {
+  color: var(--success);
 }
 .ll-fuel {
   flex: none;
@@ -131,6 +148,9 @@
   flex: none;
   display: flex;
   gap: 10px;
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
   padding: 8px 12px 10px;
 }
 .ll-btn {
@@ -220,4 +240,43 @@
   margin-top: 8px;
   font-size: 13px;
   color: var(--muted);
+}
+
+/* ── Short (landscape) viewports: give the canvas more room ──────────── */
+@media (max-height: 560px) {
+  .ll-start {
+    gap: 6px;
+    padding: 10px 24px;
+  }
+  .ll-start .big-icon {
+    font-size: 36px;
+  }
+  .ll-desc {
+    max-width: 600px;
+  }
+  .ll-panel {
+    min-height: 0;
+    gap: 4px;
+  }
+  .ll-actions {
+    flex-direction: row;
+  }
+  .ll-hud {
+    padding: 2px 10px 0;
+  }
+  .ll-hud .stat-label {
+    font-size: 10px;
+  }
+  .ll-hud .stat-value {
+    font-size: 15px;
+  }
+  .ll-fuel {
+    padding: 1px 14px 3px;
+  }
+  .ll-controls {
+    padding: 4px 12px 6px;
+  }
+  .ll-btn {
+    min-height: 64px;
+  }
 }

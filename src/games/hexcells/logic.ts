@@ -17,17 +17,29 @@ export interface DifficultyConfig {
   /** Random empty cells revealed before the solver-driven clue placement starts. */
   startClues: number;
   rules: RuleLevel;
-  /** Reaching this many mistakes loses the round. */
-  maxMistakes: number;
   /** Clue minimisation stops once this many givens are left (keeps easy boards friendly). */
   minGivens: number;
+  /** Boards need at least this many two-constraint deductions (see puzzleDepth); shallower ones are rejected. */
+  minDepth: number;
 }
 
 export const DIFFICULTIES: Record<Difficulty, DifficultyConfig> = {
-  easy: { cols: 7, rows: 8, blueRatio: 0.25, holeRatio: 0.08, startClues: 3, rules: 'basic', maxMistakes: 4, minGivens: 6 },
-  medium: { cols: 9, rows: 11, blueRatio: 0.27, holeRatio: 0.1, startClues: 3, rules: 'advanced', maxMistakes: 3, minGivens: 6 },
-  hard: { cols: 11, rows: 13, blueRatio: 0.3, holeRatio: 0.12, startClues: 2, rules: 'advanced', maxMistakes: 3, minGivens: 7 },
+  easy: { cols: 7, rows: 8, blueRatio: 0.25, holeRatio: 0.08, startClues: 3, rules: 'basic', minGivens: 6, minDepth: 1 },
+  medium: { cols: 9, rows: 11, blueRatio: 0.27, holeRatio: 0.1, startClues: 3, rules: 'advanced', minGivens: 5, minDepth: 3 },
+  hard: { cols: 11, rows: 13, blueRatio: 0.3, holeRatio: 0.12, startClues: 2, rules: 'advanced', minGivens: 4, minDepth: 4 },
 };
+
+/** Candidate boards tried per puzzle while looking for one that reaches `minDepth` (the deepest one wins). */
+export const MAX_CANDIDATES = 24;
+
+/** Seconds added to the clock for each hint and for each mistake. */
+export const HINT_PENALTY = 15;
+export const MISTAKE_PENALTY = 30;
+
+/** The clock shown in the HUD and used for records: whole elapsed seconds plus every penalty. */
+export function totalTime(elapsed: number, hints: number, mistakes: number): number {
+  return Math.floor(Math.max(0, elapsed)) + hints * HINT_PENALTY + mistakes * MISTAKE_PENALTY;
+}
 
 export const HIDDEN = 0;
 export const EMPTY = 1;
@@ -376,49 +388,93 @@ export function isSolvable(puzzle: Puzzle, level: RuleLevel): boolean {
   return solve(puzzle, initialState(puzzle), level);
 }
 
+/** A deduction that needs more than one constraint at once (subset / overlap / clue + global count). */
+export function isNonTrivial(d: Deduction): boolean {
+  return d.sources.length > 1;
+}
+
+/**
+ * How demanding a puzzle is: solve it the way a player would, always taking every single-clue deduction first
+ * (satisfied / saturated / the bare global count) and counting how often that runs dry so that a two-constraint
+ * deduction is needed. 0 means the board falls to single-clue reasoning alone. Returns -1 when unsolvable.
+ */
+export function puzzleDepth(puzzle: Puzzle, level: RuleLevel, start?: Uint8Array): number {
+  const s = start ? start.slice() : initialState(puzzle);
+  let depth = 0;
+  while (!isComplete(s)) {
+    const deds = solvePass(puzzle, s, level);
+    if (!deds.length) return -1;
+    if (isNonTrivial(deds[0])) {
+      depth++;
+      applyDeduction(s, deds[0]);
+    } else {
+      for (const d of deds) applyDeduction(s, d);
+    }
+  }
+  return depth;
+}
+
 // ── Generation ────────────────────────────────────────────────────────────
 
 /**
  * Generate a puzzle that the solver can finish from the givens with no guessing:
- * random blues → a few random clues → solve; when stuck reveal the hidden empty cell that unlocks the most,
- * repeat until solved; then drop every given that is not needed.
+ * random blues → a few random clues → solve; when stuck reveal a hidden empty cell (preferring one that only
+ * unlocks two-constraint reasoning), repeat until solved; then drop every given that is not needed.
+ * Candidates shallower than the difficulty's `minDepth` are rejected; after MAX_CANDIDATES the deepest is used.
  */
 export function generatePuzzle(difficulty: Difficulty, seed: number, opts: { minimize?: boolean } = {}): Puzzle {
   const cfg = DIFFICULTIES[difficulty];
   const rng = mulberry32(seed);
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const exists = carveHoles(cfg.cols, cfg.rows, cfg.holeRatio, rng);
-    const shape = buildGrid(cfg.cols, cfg.rows, (c, r) => exists[c][r]);
-    const n = shape.cells.length;
-    const nBlue = Math.max(1, Math.min(n - 1, Math.round(n * cfg.blueRatio)));
-    const ids = shuffle(shape.cells.map((c) => c.id), rng);
-    const blue = new Array<boolean>(n).fill(false);
-    for (let i = 0; i < nBlue; i++) blue[ids[i]] = true;
-    const given = new Array<boolean>(n).fill(false);
-    const empties = shuffle(ids.filter((id) => !blue[id]), rng);
-    for (let i = 0; i < Math.min(cfg.startClues, empties.length); i++) given[empties[i]] = true;
-
-    const puzzle = makePuzzle(cfg.cols, cfg.rows, exists, blue, given, { difficulty, seed });
-    const state = initialState(puzzle);
-    let ok = true;
-    for (let guard = 0; guard < n; guard++) {
-      if (solve(puzzle, state, cfg.rules)) break;
-      const best = pickClueCell(puzzle, state, cfg.rules, rng);
-      if (best < 0) {
-        ok = false;
-        break;
-      }
-      puzzle.given[best] = true;
-      state[best] = EMPTY;
+  let best: Puzzle | null = null;
+  let bestDepth = -1;
+  let candidates = 0;
+  for (let attempt = 0; attempt < 200 && candidates < MAX_CANDIDATES; attempt++) {
+    const puzzle = generateCandidate(difficulty, seed, rng, opts.minimize !== false);
+    if (!puzzle) continue;
+    candidates++;
+    const depth = puzzleDepth(puzzle, cfg.rules);
+    if (depth >= cfg.minDepth) return puzzle;
+    if (depth > bestDepth) {
+      best = puzzle;
+      bestDepth = depth;
     }
-    if (!ok || !isComplete(state)) continue;
-    if (opts.minimize !== false) minimizeGivens(puzzle, cfg.rules, rng, cfg.minGivens);
-    return puzzle;
   }
+  if (best) return best;
   throw new Error('could not generate a puzzle');
 }
 
-/** Hidden empty cell whose reveal unlocks the most deductions (ties broken randomly). -1 if none. */
+function generateCandidate(difficulty: Difficulty, seed: number, rng: () => number, minimize: boolean): Puzzle | null {
+  const cfg = DIFFICULTIES[difficulty];
+  const exists = carveHoles(cfg.cols, cfg.rows, cfg.holeRatio, rng);
+  const shape = buildGrid(cfg.cols, cfg.rows, (c, r) => exists[c][r]);
+  const n = shape.cells.length;
+  const nBlue = Math.max(1, Math.min(n - 1, Math.round(n * cfg.blueRatio)));
+  const ids = shuffle(shape.cells.map((c) => c.id), rng);
+  const blue = new Array<boolean>(n).fill(false);
+  for (let i = 0; i < nBlue; i++) blue[ids[i]] = true;
+  const given = new Array<boolean>(n).fill(false);
+  const empties = shuffle(ids.filter((id) => !blue[id]), rng);
+  for (let i = 0; i < Math.min(cfg.startClues, empties.length); i++) given[empties[i]] = true;
+
+  const puzzle = makePuzzle(cfg.cols, cfg.rows, exists, blue, given, { difficulty, seed });
+  const state = initialState(puzzle);
+  for (let guard = 0; guard < n; guard++) {
+    if (solve(puzzle, state, cfg.rules)) break;
+    const clue = pickClueCell(puzzle, state, cfg.rules, rng);
+    if (clue < 0) return null;
+    puzzle.given[clue] = true;
+    state[clue] = EMPTY;
+  }
+  if (!isComplete(state)) return null;
+  if (minimize) minimizeGivens(puzzle, cfg.rules, rng, cfg.minGivens);
+  return puzzle;
+}
+
+/**
+ * The hidden empty cell to reveal as a new given when the solver is stuck, or -1 if none.
+ * Preference: a clue whose only consequences need two-constraint reasoning, then one that unlocks as little as
+ * possible (long chains), never a 0 when avoidable; clues that touch more constraints break ties.
+ */
 function pickClueCell(puzzle: Puzzle, state: Uint8Array, level: RuleLevel, rng: () => number): number {
   const cons = buildConstraints(puzzle, state);
   const participation = new Map<number, number>();
@@ -431,17 +487,20 @@ function pickClueCell(puzzle: Puzzle, state: Uint8Array, level: RuleLevel, rng: 
   if (candidates.length === 0) return -1;
   shuffle(candidates, rng);
   candidates.sort((a, b) => (participation.get(b) ?? 0) - (participation.get(a) ?? 0));
-  const top = candidates.slice(0, 10);
+  const top = candidates.slice(0, 16);
   let best = top[0];
-  let bestScore = -1;
+  let bestScore = -Infinity;
   for (const id of top) {
     const trial = state.slice();
     trial[id] = EMPTY;
     const deds = solvePass(puzzle, trial, level);
     const resolved = new Set<number>();
     for (const d of deds) for (const c of d.cells) resolved.add(c);
-    // Favour clues that unlock cells; break ties towards clues that touch more constraints.
-    const score = resolved.size * 10 + (participation.get(id) ?? 0);
+    let score: number;
+    if (resolved.size === 0) score = -100;
+    else if (isNonTrivial(deds[0])) score = 100 - resolved.size;
+    else score = -5 * resolved.size;
+    score += 0.1 * (participation.get(id) ?? 0) - (puzzle.clue[id] === 0 ? 50 : 0);
     if (score > bestScore) {
       bestScore = score;
       best = id;
@@ -464,6 +523,77 @@ export function minimizeGivens(puzzle: Puzzle, level: RuleLevel, rng: () => numb
   }
 }
 
+// ── Hint presentation helpers ─────────────────────────────────────────────
+
+export type HintKind = 'zero' | 'satisfied' | 'saturated' | 'subset' | 'overlap' | 'global';
+
+/** Which explanation fits a deduction. A satisfied 0 clue gets its own wording ("no blue neighbours at all"). */
+export function hintKind(puzzle: Puzzle, d: Deduction): HintKind {
+  if (d.rule === 'satisfied') return puzzle.clue[d.sources[0]] === 0 ? 'zero' : 'satisfied';
+  return d.rule;
+}
+
+/**
+ * The deduction with its cells ordered nearest-first to the clue cells it uses, so cells[0] (the hint target) sits
+ * next to the explanation. Matters for "clue + blue-left count" deductions, whose cells can be anywhere.
+ */
+export function orderForHint(puzzle: Puzzle, d: Deduction): Deduction {
+  const src = d.sources.filter((s) => s >= 0);
+  if (!src.length || d.cells.length < 2) return d;
+  let sx = 0;
+  let sy = 0;
+  for (const s of src) {
+    const { ux, uy } = cellUnits(puzzle.cells[s].col, puzzle.cells[s].row);
+    sx += ux / src.length;
+    sy += uy / src.length;
+  }
+  const dist = (id: number): number => {
+    const { ux, uy } = cellUnits(puzzle.cells[id].col, puzzle.cells[id].row);
+    return (ux - sx) * (ux - sx) + (uy - sy) * (uy - sy);
+  };
+  const cells = d.cells.slice().sort((a, b) => dist(a) - dist(b) || a - b);
+  return { ...d, cells };
+}
+
+/** Cells a hint should keep visible: the target first, then the clues used, then (for local rules) the other cells. */
+export function hintFocus(d: Deduction): number[] {
+  const out = [d.cells[0]];
+  for (const s of d.sources) if (s >= 0 && !out.includes(s)) out.push(s);
+  if (d.rule !== 'global') for (const c of d.cells) if (!out.includes(c)) out.push(c);
+  return out;
+}
+
+export interface Rect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+export type BannerSide = 'top' | 'bottom';
+
+/**
+ * Where a banner of bw×bh, centred horizontally and inset by `margin` inside a w×h area, hides the least of `rects`.
+ * rects[0] (the hint target) weighs far more than the rest. Ties go to the side away from the target.
+ */
+export function chooseBannerSide(w: number, h: number, bw: number, bh: number, margin: number, rects: Rect[]): BannerSide {
+  const bx0 = (w - bw) / 2;
+  const bx1 = bx0 + bw;
+  const cost = (by0: number): number => {
+    const by1 = by0 + bh;
+    let sum = 0;
+    rects.forEach((r, i) => {
+      if (r.x1 > bx0 && r.x0 < bx1 && r.y1 > by0 && r.y0 < by1) sum += i === 0 ? 1000 : 1;
+    });
+    return sum;
+  };
+  const top = cost(margin);
+  const bottom = cost(h - margin - bh);
+  if (top !== bottom) return top < bottom ? 'top' : 'bottom';
+  const mid = rects.length ? (rects[0].y0 + rects[0].y1) / 2 : h;
+  return mid > h / 2 ? 'top' : 'bottom';
+}
+
 // ── Geometry (pure, so the hit-test can be unit tested) ──────────────────
 
 export const SQRT3 = Math.sqrt(3);
@@ -474,15 +604,19 @@ export interface Layout {
   /** Origin so that cell (0,0)'s centre sits at (ox, oy). */
   ox: number;
   oy: number;
+  /**
+   * Transposed board (x and y swapped): hexes become pointy-top and columns run across. Used when the area is much
+   * wider than tall (landscape phones) so the board fills it. It is a mirror image, so neighbourhoods are unchanged.
+   */
+  flip?: boolean;
 }
 
-/** Centre of a cell in units of the circumradius. */
+/** Centre of a cell in units of the circumradius (untransposed). */
 export function cellUnits(col: number, row: number): { ux: number; uy: number } {
   return { ux: 1.5 * col, uy: SQRT3 * (row + (col & 1 ? 0.5 : 0)) };
 }
 
-/** Fit the puzzle's existing cells into a w×h box with a margin, centred. */
-export function layoutGrid(puzzle: Puzzle, w: number, h: number, margin: number, maxSize = 44): Layout {
+function fitGrid(puzzle: Puzzle, w: number, h: number, margin: number, maxSize: number, flip: boolean): Layout {
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
@@ -494,24 +628,44 @@ export function layoutGrid(puzzle: Puzzle, w: number, h: number, margin: number,
     if (uy < minY) minY = uy;
     if (uy > maxY) maxY = uy;
   }
-  if (!isFinite(minX)) return { size: 10, ox: w / 2, oy: h / 2 };
-  const unitsW = maxX - minX + 2;
-  const unitsH = maxY - minY + SQRT3;
+  if (!isFinite(minX)) return { size: 10, ox: w / 2, oy: h / 2, flip };
+  // Flat-top: a hex spans 2 units across and √3 units down; transposed it is the other way round.
+  const spanU = maxX - minX + 2;
+  const spanV = maxY - minY + SQRT3;
+  const unitsW = flip ? spanV : spanU;
+  const unitsH = flip ? spanU : spanV;
   const size = Math.max(4, Math.min(maxSize, (w - 2 * margin) / unitsW, (h - 2 * margin) / unitsH));
-  const ox = (w - unitsW * size) / 2 + size - minX * size;
-  const oy = (h - unitsH * size) / 2 + (SQRT3 / 2) * size - minY * size;
-  return { size, ox, oy };
+  if (!flip) {
+    const ox = (w - unitsW * size) / 2 + size - minX * size;
+    const oy = (h - unitsH * size) / 2 + (SQRT3 / 2) * size - minY * size;
+    return { size, ox, oy, flip };
+  }
+  const ox = (w - unitsW * size) / 2 + (SQRT3 / 2) * size - minY * size;
+  const oy = (h - unitsH * size) / 2 + size - minX * size;
+  return { size, ox, oy, flip };
+}
+
+/**
+ * Fit the puzzle's existing cells into a w×h box with a margin, centred. When `allowFlip` is set and the
+ * transposed board would be clearly bigger (wide, short areas), the transposed layout is returned.
+ */
+export function layoutGrid(puzzle: Puzzle, w: number, h: number, margin: number, maxSize = 44, allowFlip = true): Layout {
+  const normal = fitGrid(puzzle, w, h, margin, maxSize, false);
+  if (!allowFlip) return normal;
+  const flipped = fitGrid(puzzle, w, h, margin, maxSize, true);
+  return flipped.size > normal.size * 1.1 ? flipped : normal;
 }
 
 export function cellCenter(col: number, row: number, L: Layout): { x: number; y: number } {
   const { ux, uy } = cellUnits(col, row);
-  return { x: L.ox + ux * L.size, y: L.oy + uy * L.size };
+  return L.flip ? { x: L.ox + uy * L.size, y: L.oy + ux * L.size } : { x: L.ox + ux * L.size, y: L.oy + uy * L.size };
 }
 
-/** Is the point inside a flat-top hexagon of circumradius r centred at (cx, cy)? */
-export function insideHex(px: number, py: number, cx: number, cy: number, r: number): boolean {
-  const dx = Math.abs(px - cx);
-  const dy = Math.abs(py - cy);
+/** Is the point inside a hexagon of circumradius r centred at (cx, cy)? Flat-top, or pointy-top when `flip`. */
+export function insideHex(px: number, py: number, cx: number, cy: number, r: number, flip = false): boolean {
+  let dx = Math.abs(px - cx);
+  let dy = Math.abs(py - cy);
+  if (flip) [dx, dy] = [dy, dx];
   const hh = (SQRT3 / 2) * r;
   if (dy > hh || dx > r) return false;
   return hh * dx + (r / 2) * dy <= hh * r + 1e-9;
@@ -531,15 +685,25 @@ export function pickCell(puzzle: Puzzle, L: Layout, px: number, py: number): num
   }
   if (best < 0) return -1;
   const { x, y } = cellCenter(puzzle.cells[best].col, puzzle.cells[best].row, L);
-  return insideHex(px, py, x, y, L.size) ? best : -1;
+  return insideHex(px, py, x, y, L.size, L.flip) ? best : -1;
 }
 
-/** Vertices of a flat-top hexagon. */
-export function hexPoints(cx: number, cy: number, r: number): [number, number][] {
+/** Vertices of a flat-top hexagon (pointy-top when `flip`). */
+export function hexPoints(cx: number, cy: number, r: number, flip = false): [number, number][] {
   const pts: [number, number][] = [];
   for (let i = 0; i < 6; i++) {
     const a = (Math.PI / 3) * i;
-    pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+    const u = r * Math.cos(a);
+    const v = r * Math.sin(a);
+    pts.push(flip ? [cx + v, cy + u] : [cx + u, cy + v]);
   }
   return pts;
+}
+
+/** Bounding box of a cell's hexagon of circumradius r. */
+export function cellRect(col: number, row: number, L: Layout, r = L.size): Rect {
+  const { x, y } = cellCenter(col, row, L);
+  const hw = L.flip ? (SQRT3 / 2) * r : r;
+  const hh = L.flip ? r : (SQRT3 / 2) * r;
+  return { x0: x - hw, y0: y - hh, x1: x + hw, y1: y + hh };
 }

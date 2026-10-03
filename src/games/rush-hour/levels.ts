@@ -1,7 +1,10 @@
 /**
  * Pre-computed level bank (compact puzzle codes, see encodePuzzle in logic.ts).
  * Built offline with searchPuzzle(hashSeed(difficulty, level), ...) so every level is reproducible;
- * every par was verified by the BFS solver (logic.test.ts re-verifies all of them).
+ * every par was verified by the BFS solver (logic.test.ts re-verifies all of them). Four entries
+ * (hard 73 and 75, expert 34 and 80) that showed the same board as an earlier level apart from
+ * vehicle colours were replaced by another in-range start state of the same lot, so every level
+ * is a distinct board.
  */
 import type { Difficulty } from './logic';
 
@@ -203,9 +206,9 @@ export const BANK: Record<Difficulty, string[]> = {
     '30:h221h243v231v224h203h201v241h332h211v253v250h254v301',
     '30:h220h204h250v251h252v222h201v244h234h211v233h340v200',
     '30:h220v352v244v203h300h214h252v230h250h233h204h242v222',
-    '30:h223h234v350h253v221v240h251v201v233v223h202h230v211h244',
+    '30:h223h233v351h254v221v240h251v200v234v223h202h230v210h244',
     '30:h223h200h352h250v220h241v203v211v222h234h213v350v233',
-    '30:h223h202h254v351v200h230v234h233h244h204v222h211h340h250',
+    '30:h223h201h254v351v200h230v234h233h244h204v222h212h340h250',
     '30:h220v341h232v254v252h342v221h204v214h230v230h352v200',
     '30:h221v341v251v232v200h303h231h253v302v210v224v253h250',
     '30:h222h250h232h253v252v230v224h240h214v254v212v242h200v301',
@@ -246,7 +249,7 @@ export const BANK: Record<Difficulty, string[]> = {
     '35:h220h351v222h213h300v250v244h211h234v232h203v254h242v204',
     '35:h220v251v200h303h340v221h234h201h250v244h252h213v232',
     '35:h220v241h204h351v352h230v231v200h233h241v221h254h202',
-    '35:h220h300v232v244h234v204v254v250h242h213v222h203h351h211',
+    '35:h220h300v232v244h234v204v254v250h242h212v222h203h351h210',
     '35:h220h250h203v332v200h201v251v222h340v244h212h234h252',
     '35:h223h251h202v204v240v250h244h253v322v200v233v252h230v210',
     '36:h220h244h250v250h301v252v200v240v222v232v242v234h230',
@@ -292,6 +295,6 @@ export const BANK: Record<Difficulty, string[]> = {
     '33:h220v234h340v221h201v200v251h203h234v232h250v244h213',
     '36:h220h203v252v250h233v303h252h210v231h241h254v222v220h200',
     '36:h220v222v333h230h241v204h254v251h300h251v253h213h203h211',
-    '36:h221h243v232v353h230h212h202v210v300v341h253h204h251v223',
+    '35:h221h243v232v352h230h212h202v210v300v341h252h204h250v223',
   ],
 };

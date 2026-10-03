@@ -28,6 +28,17 @@ export function isModeId(v: unknown): v is ModeId {
   return typeof v === 'string' && (MODE_IDS as string[]).includes(v);
 }
 
+/** The next (bigger) mode, or null after the last one. */
+export function nextMode(id: ModeId): ModeId | null {
+  const i = MODE_IDS.indexOf(id);
+  return i >= 0 && i < MODE_IDS.length - 1 ? MODE_IDS[i + 1] : null;
+}
+
+/** The power source always sits in the centre tile. */
+export function sourceIndex(size: number): number {
+  return Math.floor((size * size) / 2);
+}
+
 /** Direction indices and their deltas (0 up, 1 right, 2 down, 3 left). */
 export const DX = [0, 1, 0, -1] as const;
 export const DY = [-1, 0, 1, 0] as const;
@@ -412,10 +423,9 @@ export interface Puzzle {
  * Generate a puzzle: draw random spanning trees and keep the first one the deduction solver can fully solve
  * (unique, guess-free). Falls back to the most constrained candidate after `attempts` tries.
  */
-export function generatePuzzle(cfg: ModeConfig, rand: () => number = Math.random, attempts = 60): Puzzle {
+export function generatePuzzle(cfg: ModeConfig, rand: () => number = Math.random, attempts = 200): Puzzle {
   const { size, wrap } = cfg;
-  const n = size * size;
-  const source = Math.floor(n / 2);
+  const source = sourceIndex(size);
   let best: { solution: Uint8Array; open: number } | null = null;
   for (let a = 0; a < Math.max(1, attempts); a++) {
     const solution = spanningTree(size, wrap, source, rand, cfg.crossChance);
@@ -442,4 +452,148 @@ export function hintTile(puzzle: Puzzle, tiles: ArrayLike<number>): number {
     }
   }
   return bestIdx;
+}
+
+/** Rebuild a puzzle from a stored solution and starting orientation (par is recomputed). */
+export function rebuildPuzzle(cfg: ModeConfig, solution: ArrayLike<number>, start: ArrayLike<number>): Puzzle {
+  const sol = Uint8Array.from(solution);
+  const tiles = Uint8Array.from(start);
+  return {
+    size: cfg.size,
+    wrap: cfg.wrap,
+    source: sourceIndex(cfg.size),
+    solution: sol,
+    tiles,
+    par: computePar(tiles, sol),
+    deducible: deduce(cfg.size, cfg.wrap, tiles).solved,
+  };
+}
+
+// ── Player actions (pure helpers used by the UI) ──────────────────────────
+
+/**
+ * Position in `stack` (tile indices, oldest first) of the most recent turn that can be undone, i.e. whose tile
+ * is not locked now. -1 when there is none. Locked entries are skipped but kept, so they become undoable again
+ * once the tile is unlocked.
+ */
+export function undoTarget(stack: readonly number[], locked: ArrayLike<number>): number {
+  for (let k = stack.length - 1; k >= 0; k--) if (!locked[stack[k]]) return k;
+  return -1;
+}
+
+/**
+ * Toggle the player's lock on tile `i`. Tiles fixed by a hint stay locked: returns false and changes nothing.
+ * Otherwise flips the lock and returns true.
+ */
+export function toggleLockAt(locked: Uint8Array, hinted: ArrayLike<number>, i: number): boolean {
+  if (hinted[i]) return false;
+  locked[i] ^= 1;
+  return true;
+}
+
+export interface ParVerdict {
+  /** Turns over par (0 when exactly par). */
+  over: number;
+  /** Solved at par without any hint (hints apply the minimal turns for the player, so they never count). */
+  perfect: boolean;
+  /** The game may set the "fewest turns over par" record (hint-free games only). */
+  turnsRecord: boolean;
+}
+
+export function parVerdict(rotations: number, par: number, hints: number): ParVerdict {
+  const over = Math.max(0, rotations - par);
+  const clean = hints === 0;
+  return { over, perfect: clean && over === 0, turnsRecord: clean };
+}
+
+/**
+ * Rate limiter for repeated notices: returns a function that answers true (and remembers `now`) when at least
+ * `gapMs` passed since the last accepted call. The very first call is always accepted, whatever the clock says.
+ * `force` always accepts (for notices that must show) and restarts the gap.
+ */
+export function makeThrottle(gapMs: number): (now: number, force?: boolean) => boolean {
+  let last = -Infinity;
+  return (now: number, force = false): boolean => {
+    if (!force && now - last < gapMs) return false;
+    last = now;
+    return true;
+  };
+}
+
+/** The zoom the player last used for `mode`, read defensively from stored data (1 = whole board). */
+export function storedZoom(raw: unknown, mode: ModeId): number {
+  if (!raw || typeof raw !== 'object') return 1;
+  const z = (raw as Record<string, unknown>)[mode];
+  return typeof z === 'number' && Number.isFinite(z) && z > 1 ? Math.min(z, 4) : 1;
+}
+
+// ── Saved games ───────────────────────────────────────────────────────────
+
+export const SAVE_VERSION = 1;
+
+/** An in-progress game as stored between sessions (plain JSON). */
+export interface SaveData {
+  v: number;
+  mode: ModeId;
+  /** Solved orientation of every tile. */
+  solution: number[];
+  /** Scrambled starting orientation. */
+  start: number[];
+  /** Current orientation. */
+  tiles: number[];
+  /** 1 = locked by the player or by a hint. */
+  locked: number[];
+  /** 1 = fixed by a hint (stays fixed when the board is reset). */
+  hinted: number[];
+  rotations: number;
+  hints: number;
+  /** Play time in milliseconds, without hint penalties. */
+  elapsedMs: number;
+}
+
+/**
+ * Validate untrusted stored data. Returns a clean copy, or null when anything is missing, out of range or
+ * inconsistent (wrong board size for the mode, a solution that is not a valid network, tiles of the wrong shape).
+ */
+export function parseSave(raw: unknown): SaveData | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Record<string, unknown>;
+  if (s.v !== SAVE_VERSION || !isModeId(s.mode)) return null;
+  const cfg = MODES[s.mode];
+  const n = cfg.size * cfg.size;
+  const list = (a: unknown, max: number): number[] | null =>
+    Array.isArray(a) && a.length === n && a.every((v) => Number.isInteger(v) && v >= 0 && v <= max) ? (a as number[]).slice() : null;
+  const solution = list(s.solution, 15);
+  const start = list(s.start, 15);
+  const tiles = list(s.tiles, 15);
+  const locked = list(s.locked, 1);
+  const hinted = list(s.hinted, 1);
+  if (!solution || !start || !tiles || !locked || !hinted) return null;
+  const count = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
+  if (!count(s.rotations) || !count(s.hints)) return null;
+  if (typeof s.elapsedMs !== 'number' || !Number.isFinite(s.elapsedMs) || s.elapsedMs < 0) return null;
+  if (!isSolved(cfg.size, cfg.wrap, solution, sourceIndex(cfg.size))) return null;
+  for (let i = 0; i < n; i++) {
+    if (minRotations(start[i], solution[i]) < 0 || minRotations(tiles[i], solution[i]) < 0) return null;
+  }
+  return { v: SAVE_VERSION, mode: s.mode, solution, start, tiles, locked, hinted, rotations: s.rotations, hints: s.hints, elapsedMs: s.elapsedMs };
+}
+
+// ── Board view (zoom / pan) ───────────────────────────────────────────────
+
+/**
+ * Left (or top) offset of a board `boardPx` wide inside a viewport `viewPx` wide: centred when it fits,
+ * otherwise clamped so that at most `margin` px of empty space shows at either edge.
+ */
+export function clampOffset(offset: number, boardPx: number, viewPx: number, margin: number): number {
+  if (boardPx + 2 * margin <= viewPx) return (viewPx - boardPx) / 2;
+  const lo = viewPx - margin - boardPx;
+  const hi = margin;
+  return offset < lo ? lo : offset > hi ? hi : offset;
+}
+
+/** New offset that keeps the board point under `focal` in place while the cell size changes `cell` -> `nextCell`. */
+export function zoomOffset(offset: number, focal: number, cell: number, nextCell: number): number {
+  if (cell <= 0) return offset;
+  return focal - ((focal - offset) * nextCell) / cell;
 }

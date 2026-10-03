@@ -12,6 +12,7 @@ import {
   aimFromDrag,
   captureThreshold,
   collideCircle,
+  collideRect,
   collideSeg,
   distanceMap,
   formatVsPar,
@@ -20,6 +21,7 @@ import {
   holeIssues,
   holeScore,
   isBallLost,
+  isValidProgress,
   moverRect,
   moverVel,
   newSim,
@@ -144,6 +146,32 @@ describe('segment reflection', () => {
   });
 });
 
+describe('moving block (rect) collision', () => {
+  const r = { x: 4, y: 4, w: 2, h: 1 };
+  it('reflects a ball touching a face', () => {
+    const b: Ball = { x: 5, y: 3.9, vx: 0, vy: 3 };
+    expect(collideRect(b, r, BALL_R, 1)).toBe(true);
+    expect(b.vy).toBeCloseTo(-3);
+    expect(b.y).toBeCloseTo(4 - BALL_R);
+  });
+  it('pushes a centre that ended up inside out through the nearest face', () => {
+    const b: Ball = { x: 5.9, y: 4.5, vx: -1, vy: 0 };
+    collideRect(b, r, BALL_R, 0.85);
+    expect(b.x).toBeCloseTo(6 + BALL_R);
+    expect(b.vx).toBeGreaterThan(0);
+  });
+  it('carries the block velocity into the ball', () => {
+    const b: Ball = { x: 6.1, y: 4.5, vx: 0, vy: 0 };
+    expect(collideRect(b, r, BALL_R, 0.85, { x: 2, y: 0 })).toBe(true);
+    expect(b.vx).toBeGreaterThan(2);
+  });
+  it('ignores a ball that is clear of the block', () => {
+    const b: Ball = { x: 7, y: 4.5, vx: -1, vy: 0 };
+    expect(collideRect(b, r, BALL_R, 0.85)).toBe(false);
+    expect(b.x).toBe(7);
+  });
+});
+
 describe('bumper reflection', () => {
   it('bounces a ball off a circle and pushes it out', () => {
     const b: Ball = { x: 5, y: 6.6, vx: 0, vy: -5 };
@@ -169,6 +197,16 @@ describe('aim and shooting', () => {
     expect(a.power).toBeGreaterThan(0.3);
     expect(a.power).toBeLessThan(0.6);
     expect(aimFromDrag(ball, { x: 5, y: 30 }).power).toBe(1);
+  });
+  it('honours a custom (screen-based) drag scale and anchor', () => {
+    const anchor = { x: 2, y: 2 };
+    const a = aimFromDrag(anchor, { x: 4, y: 2 }, 4, 1); // pull 2 of 1..4 → 1/3 power, aimed left
+    expect(a.valid).toBe(true);
+    expect(a.dir.x).toBeCloseTo(-1);
+    expect(a.power).toBeCloseTo(1 / 3);
+    expect(aimFromDrag(anchor, { x: 2.9, y: 2 }, 4, 1).valid).toBe(false); // back inside the cancel zone
+    expect(aimFromDrag(anchor, { x: 1, y: 2 }, 4, 1).power).toBeGreaterThan(0); // just outside: tiny but valid
+    expect(aimFromDrag(anchor, { x: 9, y: 2 }, 1, 1).valid).toBe(false); // degenerate scale is rejected
   });
   it('shoot sets velocity, counts a stroke and refuses while moving', () => {
     const h = openHole();
@@ -270,7 +308,9 @@ describe('zones', () => {
 describe('cup capture', () => {
   it('threshold is highest for a centre hit and equals captureSpeed at the rim', () => {
     expect(captureThreshold(cfg, CUP_R)).toBeCloseTo(cfg.captureSpeed);
-    expect(captureThreshold(cfg, 0)).toBeCloseTo(cfg.captureSpeed * 1.6);
+    expect(captureThreshold(cfg, 0)).toBeCloseTo(cfg.captureSpeed * (1 + PHYS.cupCentreBonus));
+    expect(captureThreshold(cfg, CUP_R / 2)).toBeGreaterThan(cfg.captureSpeed);
+    expect(captureThreshold(cfg, CUP_R / 2)).toBeLessThan(captureThreshold(cfg, 0));
     expect(captureThreshold(cfg, CUP_R * 2)).toBeCloseTo(cfg.captureSpeed);
   });
   it('a slow ball drops in, a fast ball skips over', () => {
@@ -293,7 +333,7 @@ describe('cup capture', () => {
   });
   it('pro requires a gentler touch than casual', () => {
     const h = openHole({ cup: { x: 0, y: -3 } });
-    const sinks = (c = cfg, v = 10) => {
+    const sinks = (c = cfg, v = 8) => {
       const st = newSim(h, { x: 0, y: 0 });
       st.ball.vy = -v;
       st.moving = true;
@@ -342,6 +382,23 @@ describe('safety nets', () => {
       expect(pointInPoly(st.ball.x, st.ball.y, h.blocks[0])).toBe(false);
     }
   });
+  it('a ball can never come to rest on a booster: it is pushed back out', () => {
+    const z = { x: -5, y: -6, w: 10, h: 4, dir: { x: 0, y: -1 } };
+    const h = openHole({ boosters: [z] });
+    const st = newSim(h, { x: 0, y: -8 }); // above the booster, rolling down into it slowly
+    st.ball.vy = 3;
+    st.moving = true;
+    runUntilRest(st, h);
+    expect(st.moving).toBe(false);
+    expect(st.ball.y).toBeLessThan(z.y); // ended up beyond the booster, in its push direction
+  });
+  it('a ball pinned against a wall by a booster is eventually stopped', () => {
+    const h = openHole({ outline: rect(0, 0, 10, 16), boosters: [{ x: 0, y: 6, w: 3, h: 3, dir: { x: -1, y: 0 } }] });
+    const st = newSim(h, { x: 1.5, y: 7.5 });
+    shoot(st, { x: -1, y: 0 }, 0.3);
+    runUntilRest(st, h, cfg, PHYS.maxRoll + 5);
+    expect(st.moving).toBe(false);
+  });
   it('a ball trapped between bumpers still comes to rest', () => {
     const h = openHole({
       bumpers: [
@@ -372,6 +429,33 @@ describe('predictPath', () => {
     const pts = predictPath(newSim(h), h, cfg, { x: 1, y: 0 }, 1, 5, 0.2);
     expect(pts.length).toBeLessThan(5 * 60);
     expect(Math.max(...pts.map((p) => p.x))).toBeLessThanOrEqual(8.5 - BALL_R + 0.05);
+  });
+});
+
+describe('saved progress', () => {
+  const ok = { diff: 'standard', hole: 2, scores: [2, 3], strokes: 1, ball: { ...HOLES[2].start } };
+  it('accepts a well-formed save', () => {
+    expect(isValidProgress(ok)).toBe(true);
+    expect(isValidProgress({ ...ok, strokes: DIFF.standard.maxStrokes })).toBe(true); // last putt was rolling
+  });
+  it('rejects corrupted or inconsistent saves', () => {
+    expect(isValidProgress(null)).toBe(false);
+    expect(isValidProgress('x')).toBe(false);
+    expect(isValidProgress({ ...ok, diff: 'insane' })).toBe(false);
+    expect(isValidProgress({ ...ok, hole: 18, scores: new Array(18).fill(3) })).toBe(false);
+    expect(isValidProgress({ ...ok, hole: 1.5 })).toBe(false);
+    expect(isValidProgress({ ...ok, scores: [2] })).toBe(false);
+    expect(isValidProgress({ ...ok, scores: [2, 0] })).toBe(false);
+    expect(isValidProgress({ ...ok, scores: [2, 99] })).toBe(false);
+    expect(isValidProgress({ ...ok, strokes: -1 })).toBe(false);
+    expect(isValidProgress({ ...ok, strokes: DIFF.standard.maxStrokes + 1 })).toBe(false);
+    expect(isValidProgress({ ...ok, ball: null })).toBe(false);
+    expect(isValidProgress({ ...ok, ball: { x: NaN, y: 3 } })).toBe(false);
+    expect(isValidProgress({ ...ok, ball: { x: -3, y: 3 } })).toBe(false); // off the course
+    expect(isValidProgress({ ...ok, ball: { x: 1.01, y: 8 } })).toBe(false); // hugging a wall
+    expect(isValidProgress({ ...ok, ball: { x: 5, y: 7.1 } })).toBe(false); // inside a bumper
+    const water = HOLES[4].water[0];
+    expect(isValidProgress({ ...ok, hole: 4, scores: [2, 3, 3, 3], ball: { x: water.x + 1, y: water.y + 1 } })).toBe(false);
   });
 });
 
@@ -476,12 +560,86 @@ describe('hole definitions', () => {
       });
     }
   }, 60000);
-  it('hole 8 can be aced through the booster', () => {
+  it('every booster releases the ball or lets it settle against a rail (never jitters forever)', () => {
+    HOLES.forEach((h, i) => {
+      for (const z of h.boosters) {
+        const st = newSim(h, { x: z.x + z.w / 2, y: z.y + z.h / 2 });
+        st.ball.vx = z.dir.x * 0.5;
+        st.ball.vy = z.dir.y * 0.5;
+        st.moving = true;
+        let t = 0;
+        while (t < 4 && st.moving && z.x <= st.ball.x && st.ball.x <= z.x + z.w && z.y <= st.ball.y && st.ball.y <= z.y + z.h) {
+          stepSim(st, h, cfg, 1 / 60);
+          t += 1 / 60;
+        }
+        expect(t, `booster in hole ${i + 1}`).toBeLessThan(4);
+      }
+    });
+  });
+  it('a moving block shoving a resting ball never drops it in water or loses it', () => {
+    HOLES.forEach((h, i) => {
+      for (const m of h.movers) {
+        const lo = moverRect(m, m.period * 0.75);
+        const hi = moverRect(m, m.period * 0.25);
+        const x0 = Math.min(lo.x, hi.x) - 0.4;
+        const x1 = Math.max(lo.x + lo.w, hi.x + hi.w) + 0.4;
+        for (let x = x0; x <= x1; x += 0.3) {
+          for (const y of [m.cy - m.h / 2 - 0.25, m.cy, m.cy + m.h / 2 + 0.25]) {
+            const p = { x, y };
+            if (!isValidProgress({ diff: 'standard', hole: i, scores: new Array(i).fill(3), strokes: 0, ball: p })) continue;
+            const st = newSim(h, p);
+            st.time = m.period * 0.6;
+            const ev: PhysEvent[] = [];
+            for (let t = 0; t < m.period * 2.5; t += 1 / 60) ev.push(...stepSim(st, h, cfg, 1 / 60));
+            expect(ev.some((e) => e.type === 'water' || e.type === 'rescue'), `hole ${i + 1} at ${x.toFixed(1)},${y.toFixed(2)}`).toBe(false);
+            expect(st.strokes).toBe(0);
+          }
+        }
+      }
+    });
+  });
+  it('random putts on every hole settle quickly and never tunnel through a wall', () => {
+    let seed = 99;
+    const rnd = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    HOLES.forEach((h, i) => {
+      let st = newSim(h);
+      for (let k = 0; k < 40; k++) {
+        if (st.sunk || k % 8 === 0) st = newSim(h);
+        const a = rnd() * Math.PI * 2;
+        st.strokes = 0;
+        shoot(st, { x: Math.cos(a), y: Math.sin(a) }, 0.05 + rnd() * 0.95);
+        let t = 0;
+        while (st.moving && t < 20) {
+          const ev = stepSim(st, h, cfg, 1 / 60);
+          expect(ev.some((e) => e.type === 'rescue'), `hole ${i + 1} shot ${k}`).toBe(false);
+          t += 1 / 60;
+        }
+        expect(t, `hole ${i + 1} shot ${k} settle time`).toBeLessThan(10);
+        expect(isBallLost(h, st.ball)).toBe(false);
+      }
+    });
+  });
+  it('hole 8 (crosswind) punishes the straight line and rewards compensating', () => {
     const h = HOLES[7];
-    const st = newSim(h);
-    shoot(st, { x: 0, y: -1 }, 0.45);
-    runUntilRest(st, h, DIFF.pro, 40);
-    expect(st.sunk).toBe(true);
-    expect(st.strokes).toBe(1);
+    const shot = (deg: number, p: number, c = cfg) => {
+      const st = newSim(h);
+      const a = -Math.PI / 2 + (deg * Math.PI) / 180;
+      shoot(st, { x: Math.cos(a), y: Math.sin(a) }, p);
+      runUntilRest(st, h, c, 40);
+      return st;
+    };
+    for (const p of [0.5, 0.6, 0.7]) {
+      const st = shot(0, p);
+      expect(st.sunk).toBe(false);
+      expect(st.ball.x).toBeGreaterThan(h.cup.x + CUP_R); // blown to the right
+    }
+    for (const c of [DIFF.standard, DIFF.pro]) {
+      const st = shot(-10, 0.6, c);
+      expect(st.sunk).toBe(true);
+      expect(st.strokes).toBe(1);
+    }
   });
 });

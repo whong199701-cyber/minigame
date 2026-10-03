@@ -616,6 +616,119 @@ export function nearestObjectAngle(balls: Ball[], fallback = -Math.PI / 2): numb
   return angle;
 }
 
+// ── Aim / power gesture (pure; screen-pixel units) ───────────────────────────
+//
+// One-finger control, two flavours decided on press:
+//  • "grab": the press lands on (or right next to) the cue ball → slingshot. The aim never changes; power is the
+//    finger's pull along the line behind the cue ball (−aim). Sideways drift is ignored, so grabbing the ball
+//    anywhere and pulling back shoots exactly where the aim line pointed.
+//  • "turn": the press lands elsewhere on the table. Every ≥ SAMPLE_PX step of the finger is split into a part
+//    around the cue ball (tangential) and a part away from it (radial). Mostly-tangential steps rotate the aim with
+//    the finger's angle around the ball (finer the further away) and never charge power; mostly-radial steps
+//    charge (outward) or discharge (inward) power and never rotate the aim. Once the charge reaches AIM_LOCK the
+//    aim is locked; sliding back toward the start drops the charge and unlocks it again (= cancel).
+// A release fires only when the finger really moved (> TAP_MOVE_PX) and the charge is at least FIRE_MIN, which is
+// deliberately larger than TAP_MOVE_PX so a long press with a little drift never shoots.
+
+/** Finger pull (CSS px) for full power. */
+export const PULL_PX = 150;
+/** Movement (px) from the press point beyond which the gesture is a drag, not a tap. */
+export const TAP_MOVE_PX = 8;
+/** Smallest charge that fires on release (FIRE_MIN · PULL_PX = 12 px > TAP_MOVE_PX). */
+export const FIRE_MIN = 0.08;
+/** Charge from which the aim is locked in "turn" mode. */
+export const AIM_LOCK = FIRE_MIN;
+/** Minimum finger radius (px) that counts as a press on the cue ball (a fingertip is ~40 px wide). */
+export const GRAB_MIN_PX = 28;
+/** Finger steps shorter than this (px) are accumulated before being classified (reduces jitter). */
+export const SAMPLE_PX = 2;
+/** Closer than this (px) to the cue ball the finger angle is unstable, so rotation is damped. */
+export const NEAR_PX = 36;
+
+export interface AimGesture {
+  grab: boolean;
+  /** Press point. */
+  x0: number;
+  y0: number;
+  /** Last sampled finger point. */
+  lx: number;
+  ly: number;
+  /** "turn" mode: finger distance from the cue ball that counts as zero charge. */
+  base: number;
+  aim: number;
+  /** Charge 0..1 (raw finger pull / PULL_PX). */
+  power: number;
+  /** Finger has moved more than TAP_MOVE_PX from the press point. */
+  moved: boolean;
+}
+
+function wrapAngle(a: number): number {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** Radius (px) around the cue-ball centre in which a press grabs the ball, for a given table scale (px/unit). */
+export function grabRadiusPx(scale: number): number {
+  return Math.max(R * scale * 2, GRAB_MIN_PX);
+}
+
+/** Start a gesture: cue ball centre (cx, cy) and press point (px, py) in px, current aim angle. */
+export function beginAim(cx: number, cy: number, px: number, py: number, aim: number, grabPx: number): AimGesture {
+  const d0 = Math.hypot(px - cx, py - cy);
+  return { grab: d0 <= grabPx, x0: px, y0: py, lx: px, ly: py, base: d0, aim, power: 0, moved: false };
+}
+
+/** Feed a finger position (px). Mutates `g.aim` / `g.power`. */
+export function moveAim(g: AimGesture, cx: number, cy: number, px: number, py: number): void {
+  if (!g.moved && Math.hypot(px - g.x0, py - g.y0) > TAP_MOVE_PX) g.moved = true;
+  if (g.grab) {
+    const pull = -(px - g.x0) * Math.cos(g.aim) - (py - g.y0) * Math.sin(g.aim);
+    g.power = clamp01(pull / PULL_PX);
+    return;
+  }
+  const sx = px - g.lx;
+  const sy = py - g.ly;
+  if (Math.hypot(sx, sy) < SAMPLE_PX) return;
+  const rL = Math.hypot(g.lx - cx, g.ly - cy);
+  const rP = Math.hypot(px - cx, py - cy);
+  // Split the step against the radial direction at its midpoint.
+  const mx = (g.lx + px) / 2 - cx;
+  const my = (g.ly + py) / 2 - cy;
+  const ml = Math.hypot(mx, my) || 1;
+  const radial = (sx * mx + sy * my) / ml;
+  const tangential = Math.abs(sx * my - sy * mx) / ml;
+  if (tangential > Math.abs(radial)) {
+    // Sideways: rotate (unless charged) and let the zero-charge distance follow the finger.
+    g.base += rP - rL;
+    if (g.power < AIM_LOCK) {
+      let da = wrapAngle(Math.atan2(py - cy, px - cx) - Math.atan2(g.ly - cy, g.lx - cx));
+      if (rP < NEAR_PX) da *= rP / NEAR_PX;
+      g.aim = wrapAngle(g.aim + Math.max(-0.6, Math.min(0.6, da)));
+    }
+  }
+  // Coming in closer than the zero-charge distance moves it in, so the pull always starts where the finger is.
+  if (rP < g.base) g.base = rP;
+  g.power = clamp01((rP - g.base) / PULL_PX);
+  g.lx = px;
+  g.ly = py;
+}
+
+/** True when the gesture is a tap (no real movement within the tap time). */
+export function isTap(g: AimGesture, heldMs: number, tapMs = 350): boolean {
+  return !g.moved && heldMs < tapMs;
+}
+
+/** Shot power (0..1, mapped so FIRE_MIN → softest shot) to fire on release, or null when the release must not shoot. */
+export function releasePower(g: AimGesture): number | null {
+  if (!g.moved || g.power < FIRE_MIN) return null;
+  return clamp01((g.power - FIRE_MIN) / (1 - FIRE_MIN));
+}
+
 /** Star rating for a finished game: 3 = under par, 2 = par, 1 = over par. */
 export function starsFor(mode: Mode, shots: number): number {
   const par = MODES[mode].par;
