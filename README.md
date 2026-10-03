@@ -36,6 +36,12 @@ dark & light themes, synthesized sound effects and haptic feedback.
 部署到 GitHub Pages 后，用手机浏览器打开链接，在菜单里选择「添加到主屏幕」，即可像 App 一样全屏运行，
 首次打开后可离线使用。
 
+## 单文件版 · Single-file build
+
+`npm run build:single` 会把整个应用打成一个独立的 HTML 文件（`dist-single/brain-arena.html`，约 720 KB），
+所有游戏、样式和图标都内联在里面，不需要服务器和网络，直接用浏览器打开即可玩。单文件版没有离线缓存和
+「添加到主屏幕」功能，这两项需要通过网址访问的 PWA 版本。
+
 ## 开发 · Develop
 
 ```bash

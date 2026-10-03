@@ -4,3 +4,4 @@ dev-dist
 .smoke
 *.log
 .DS_Store
+dist-single
