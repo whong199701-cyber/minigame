@@ -27,6 +27,7 @@ import {
   newSim,
   pointInPoly,
   predictPath,
+  progressAfterHole,
   rect,
   scoreTerm,
   shoot,
@@ -207,6 +208,22 @@ describe('aim and shooting', () => {
     expect(aimFromDrag(anchor, { x: 2.9, y: 2 }, 4, 1).valid).toBe(false); // back inside the cancel zone
     expect(aimFromDrag(anchor, { x: 1, y: 2 }, 4, 1).power).toBeGreaterThan(0); // just outside: tiny but valid
     expect(aimFromDrag(anchor, { x: 9, y: 2 }, 1, 1).valid).toBe(false); // degenerate scale is rejected
+  });
+  it('a drag that started away from the ball cancels when brought back onto the ball', () => {
+    const ball = { x: 5, y: 10 };
+    const anchor = { x: 5, y: 7 }; // pressed on the course above the ball
+    // Pulled down onto the ball: long pull from the anchor, but the finger is on the ball → cancel.
+    const onBall = aimFromDrag(anchor, { x: 5.2, y: 10.1 }, 4, 0.6, ball);
+    expect(onBall.pull).toBeGreaterThan(0.6);
+    expect(onBall.valid).toBe(false);
+    // Same pull, released beside the ball → a real putt.
+    const beside = aimFromDrag(anchor, { x: 6, y: 10 }, 4, 0.6, ball);
+    expect(beside.valid).toBe(true);
+    expect(beside.dir.y).toBeLessThan(0);
+    // Without a ball (drag anchored on the ball itself) only the pull length matters.
+    expect(aimFromDrag(anchor, { x: 5.2, y: 10.1 }, 4, 0.6).valid).toBe(true);
+    // Back on the start point still cancels too.
+    expect(aimFromDrag(anchor, { x: 5.1, y: 7.1 }, 4, 0.6, ball).valid).toBe(false);
   });
   it('shoot sets velocity, counts a stroke and refuses while moving', () => {
     const h = openHole();
@@ -459,6 +476,30 @@ describe('saved progress', () => {
   });
 });
 
+describe('progress after a hole', () => {
+  it('commits the score and points the save at the next tee', () => {
+    const before = [2, 3];
+    const r = progressAfterHole({ diff: 'pro', hole: 2, scores: before }, 4);
+    expect(r.scores).toEqual([2, 3, 4]);
+    expect(before).toEqual([2, 3]); // input untouched
+    expect(r.next).toEqual({ diff: 'pro', hole: 3, scores: [2, 3, 4], strokes: 0, ball: HOLES[3].start });
+    expect(r.next!.ball).not.toBe(HOLES[3].start); // a copy, not the hole definition itself
+    expect(isValidProgress(r.next)).toBe(true);
+  });
+  it('a max-strokes hole is committed as max + 1 and still yields a valid save', () => {
+    const r = progressAfterHole({ diff: 'standard', hole: 0, scores: [] }, holeScore(8, false, cfg));
+    expect(r.scores).toEqual([cfg.maxStrokes + 1]);
+    expect(isValidProgress(r.next)).toBe(true);
+  });
+  it('the last hole ends the round (nothing left to save)', () => {
+    const played = HOLES.slice(0, HOLE_COUNT - 1).map((h) => h.par);
+    const r = progressAfterHole({ diff: 'casual', hole: HOLE_COUNT - 1, scores: played }, 3);
+    expect(r.next).toBeNull();
+    expect(r.scores).toHaveLength(HOLE_COUNT);
+    expect(sumScores(r.scores)).toBe(sumScores(played) + 3);
+  });
+});
+
 describe('scoring', () => {
   it('maps strokes to golf terms', () => {
     expect(scoreTerm(1, 3)).toBe('holeInOne');
@@ -475,6 +516,9 @@ describe('scoring', () => {
     expect(formatVsPar(0)).toBe('E');
     expect(formatVsPar(3)).toBe('+3');
     expect(formatVsPar(-2)).toBe('−2');
+    // The UI passes the translated "even" label.
+    expect(formatVsPar(0, '平')).toBe('平');
+    expect(formatVsPar(2, '平')).toBe('+2');
   });
   it('hole score and totals', () => {
     expect(holeScore(3, true, cfg)).toBe(3);
@@ -622,6 +666,29 @@ describe('hole definitions', () => {
       }
     });
   });
+  it('hole 1 needs aim and touch: no straight-pull ace, and no hard-putt ace on pro', () => {
+    const h = HOLES[0];
+    const run = (deg: number, p: number, c = cfg) => {
+      const st = newSim(h);
+      const a = (deg * Math.PI) / 180;
+      shoot(st, { x: Math.cos(a), y: Math.sin(a) }, p);
+      runUntilRest(st, h, c, 25);
+      return st;
+    };
+    const aim = (Math.atan2(h.cup.y - h.start.y, h.cup.x - h.start.x) * 180) / Math.PI;
+    for (const d of DIFFICULTIES) {
+      // Pulling straight down never drops, whatever the power.
+      for (let off = -2; off <= 2; off += 0.5) {
+        for (let p = 0.3; p <= 1.0001; p += 0.05) expect(run(270 + off, p, DIFF[d]).sunk, `${d} straight ${off}° p=${p.toFixed(2)}`).toBe(false);
+      }
+      // A well-judged putt at the cup still drops.
+      expect(run(aim, 0.68, DIFF[d]).sunk, `${d} touch putt`).toBe(true);
+    }
+    // Over-hit putts at the cup do not drop on standard (they die in the back bunker) …
+    for (let off = -2; off <= 2; off += 0.5) for (const p of [0.94, 1]) expect(run(aim + off, p).sunk, `standard ${off}° p=${p}`).toBe(false);
+    // … and on pro no hard putt (≥ 0.8) drops from anywhere on the tee.
+    for (let a = 0; a < 360; a += 1) for (let p = 0.8; p <= 1.0001; p += 0.04) expect(run(a, p, DIFF.pro).sunk, `pro ${a}° p=${p.toFixed(2)}`).toBe(false);
+  }, 30000);
   it('hole 8 (crosswind) punishes the straight line and rewards compensating', () => {
     const h = HOLES[7];
     const shot = (deg: number, p: number, c = cfg) => {

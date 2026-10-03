@@ -520,11 +520,30 @@ export function makeThrottle(gapMs: number): (now: number, force?: boolean) => b
   };
 }
 
-/** The zoom the player last used for `mode`, read defensively from stored data (1 = whole board). */
-export function storedZoom(raw: unknown, mode: ModeId): number {
-  if (!raw || typeof raw !== 'object') return 1;
+/**
+ * The zoom the player last chose for `mode`, read defensively from stored data: 1 = whole board (an explicit
+ * choice, e.g. the fit button), capped at 4. null when nothing valid is stored, so the board opens at `autoZoom`.
+ */
+export function storedZoom(raw: unknown, mode: ModeId): number | null {
+  if (!raw || typeof raw !== 'object') return null;
   const z = (raw as Record<string, unknown>)[mode];
-  return typeof z === 'number' && Number.isFinite(z) && z > 1 ? Math.min(z, 4) : 1;
+  if (typeof z !== 'number' || !Number.isFinite(z) || z <= 0) return null;
+  return Math.min(Math.max(z, 1), 4);
+}
+
+/** Tiles smaller than this (CSS px) are hard to hit with a finger. */
+export const SMALL_CELL = 38;
+/** Finger-sized tile (CSS px): the 44 px touch target. */
+export const TOUCH_CELL = 44;
+
+/**
+ * Zoom a board opens at when the player has not chosen one for that size: the whole board, unless that makes the
+ * tiles too small to tap reliably (expert, or hard on a small phone), then zoomed in until they reach `TOUCH_CELL`
+ * (never beyond `zoomMax`). The fit button still shows the whole board, and that choice is remembered.
+ */
+export function autoZoom(baseCell: number, zoomMax: number): number {
+  if (!(baseCell > 0) || baseCell >= SMALL_CELL) return 1;
+  return Math.max(1, Math.min(zoomMax, TOUCH_CELL / baseCell));
 }
 
 // ── Saved games ───────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import {
   MODES,
   MODE_IDS,
   SAVE_VERSION,
+  autoZoom,
   clampOffset,
   computePower,
   degree,
@@ -53,7 +54,7 @@ const MAX_CELL = 104;
 const strings = {
   zh: {
     rules:
-      '点按电路，它会顺时针旋转 90°。正中央的 ⚡ 是电源。\n与电源连通的导线会亮起，终端电脑的屏幕也随之点亮。\n获胜：所有电路都通电，且没有任何接口指向空处。\n长按锁定 / 解锁电路；↶ 撤销一次旋转（次数不退回）。\n「标准」是最少旋转次数。纪录：最快用时、最少超标次数。\n💡 提示转正并锁定一块电路：计时 +20 秒，本局不计超标纪录。\n大棋盘可双指缩放、拖动。专家模式的边缘首尾相连。',
+      '点按电路，顺时针旋转 90°。\n与中央 ⚡ 电源连通的导线会亮起。\n获胜：全部通电，且没有接口指向空处。\n长按锁定或解锁；↶ 撤销一次旋转（次数照算）。\n标准＝最少旋转次数。纪录：最快用时、最少超标。\n💡 转正并锁定一块：计时 +20 秒，不计超标纪录。\n专家模式边缘环绕；大棋盘可双指缩放。',
     tagline: '转动电路，把电送到每一台终端',
     tip: '点按旋转 · 长按锁定',
     tipZoom: '点按旋转 · 长按锁定 · 双指缩放',
@@ -94,7 +95,7 @@ const strings = {
   },
   en: {
     rules:
-      'Tap a tile to turn it 90° clockwise. The ⚡ in the centre is the power source.\nWires joined to the source light up and terminal screens switch on.\nWin: every tile powered, and no connector pointing at empty space.\nLong-press locks or unlocks a tile. ↶ undoes a turn (it still counts).\nPar is the fewest turns needed. Records: best time, fewest turns over par.\n💡 fixes and locks one tile: +20 s, and no turns record for that game.\nBig boards: pinch to zoom, drag to pan. Expert edges wrap around.',
+      'Tap a tile to turn it 90° clockwise.\nWires joined to the ⚡ source in the centre light up.\nWin: every tile lit, no connector pointing at nothing.\nLong-press: lock / unlock. ↶ undo (still counts).\nPar = fewest turns. Records: time, turns over par.\n💡 fixes and locks a tile: +20 s, no turns record.\nExpert edges wrap; pinch to zoom big boards.',
     tagline: 'Rotate the tiles until power reaches every terminal',
     tip: 'Tap to rotate · long-press to lock',
     tipZoom: 'Tap to rotate · long-press to lock · pinch to zoom',
@@ -245,6 +246,8 @@ function create(ctx: GameContext): GameInstance {
   let fitting = false;
   /** The wheel changed the zoom since it was last remembered. */
   let zoomDirty = false;
+  /** No zoom chosen for this size yet: follow `autoZoom` (finger-sized tiles) on every layout. */
+  let zoomAuto = false;
 
   // ── Input ─────────────────────────────────────────────────────────────
   const pointers = new Map<number, { x: number; y: number }>();
@@ -536,6 +539,7 @@ function create(ctx: GameContext): GameInstance {
     fitBtn = el('button', { class: 'nw-fit', type: 'button', 'aria-label': t('fit'), title: t('fit'), text: '⤢' });
     fitBtn.addEventListener('click', () => {
       ctx.play('swoosh');
+      zoomAuto = false;
       fitting = true;
       requestFrame();
     });
@@ -572,6 +576,7 @@ function create(ctx: GameContext): GameInstance {
       if (zoomMax <= 1 || phase !== 'playing') return;
       e.preventDefault();
       fitting = false;
+      zoomAuto = false;
       zoomDirty = true;
       const r = canvas.getBoundingClientRect();
       setZoom(zoom * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
@@ -604,14 +609,22 @@ function create(ctx: GameContext): GameInstance {
 
   // ── Layout / view ─────────────────────────────────────────────────────
   function layout(w: number, h: number): void {
+    // The board point in the middle of the view stays there across resizes (e.g. turning the phone while zoomed).
+    const midX = cell > 0 ? (viewW / 2 - offX) / cell : 0;
+    const midY = cell > 0 ? (viewH / 2 - offY) / cell : 0;
     viewW = w;
     viewH = h;
     if (!puzzle) return;
     baseCell = clamp((Math.min(w, h) - MARGIN * 2) / size, 8, MAX_CELL);
     const zm = ZOOM_TARGET_CELL / baseCell;
     zoomMax = zm >= 1.3 ? Math.min(2.6, zm) : 1;
+    if (zoomAuto) zoom = autoZoom(baseCell, zoomMax);
     zoom = clamp(zoom, 1, zoomMax);
     cell = baseCell * zoom;
+    if (Number.isFinite(midX) && Number.isFinite(midY)) {
+      offX = w / 2 - midX * cell;
+      offY = h / 2 - midY * cell;
+    }
     clampView();
     if (tipEl) tipEl.textContent = t(zoomMax > 1 ? 'tipZoom' : 'tip');
     requestFrame();
@@ -649,10 +662,10 @@ function create(ctx: GameContext): GameInstance {
     const prefs: Record<string, number> = {};
     for (const m of MODE_IDS) {
       const z = storedZoom(raw, m);
-      if (z > 1) prefs[m] = z;
+      if (z !== null) prefs[m] = z;
     }
-    if (zoom > 1.01) prefs[mode] = Math.round(zoom * 100) / 100;
-    else delete prefs[mode];
+    // 1 is stored too: "whole board" is a choice that overrides the automatic zoom-in for small tiles.
+    prefs[mode] = zoom > 1.01 ? Math.round(zoom * 100) / 100 : 1;
     ctx.storage.set('zoom', prefs);
   }
 
@@ -702,6 +715,7 @@ function create(ctx: GameContext): GameInstance {
   function startPinch(): void {
     const [a, b] = [...pointers.values()];
     gesture = 'pinch';
+    zoomAuto = false;
     pinch.d0 = Math.max(10, Math.hypot(a.x - b.x, a.y - b.y));
     pinch.z0 = zoom;
     const mx = (a.x + b.x) / 2;
@@ -899,7 +913,9 @@ function create(ctx: GameContext): GameInstance {
     result = null;
     winT = -1;
     winDist = null;
-    zoom = storedZoom(ctx.storage.get<unknown>('zoom', null), mode);
+    const zoomPref = storedZoom(ctx.storage.get<unknown>('zoom', null), mode);
+    zoomAuto = zoomPref === null;
+    zoom = zoomPref ?? 1;
     fitting = false;
     zoomDirty = false;
     cursor = -1;

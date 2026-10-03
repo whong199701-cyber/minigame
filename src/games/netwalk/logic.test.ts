@@ -35,6 +35,9 @@ import {
   parVerdict,
   makeThrottle,
   storedZoom,
+  autoZoom,
+  SMALL_CELL,
+  TOUCH_CELL,
   SAVE_VERSION,
   type Puzzle,
   type SaveData,
@@ -584,14 +587,48 @@ describe('storedZoom', () => {
   it('reads a remembered zoom per mode', () => {
     expect(storedZoom({ expert: 1.6, hard: 1.2 }, 'expert')).toBe(1.6);
     expect(storedZoom({ expert: 1.6, hard: 1.2 }, 'hard')).toBe(1.2);
-    expect(storedZoom({ expert: 1.6 }, 'easy')).toBe(1);
   });
-  it('falls back to the whole board for missing or corrupted data', () => {
-    expect(storedZoom(null, 'expert')).toBe(1);
-    expect(storedZoom('x', 'expert')).toBe(1);
-    expect(storedZoom({ expert: 'big' }, 'expert')).toBe(1);
-    expect(storedZoom({ expert: NaN }, 'expert')).toBe(1);
+  it('keeps an explicit whole-board choice (1) apart from "nothing stored" (null)', () => {
+    expect(storedZoom({ expert: 1 }, 'expert')).toBe(1);
+    expect(storedZoom({ expert: 1.6 }, 'easy')).toBeNull();
     expect(storedZoom({ expert: 0.4 }, 'expert')).toBe(1);
+  });
+  it('ignores missing or corrupted data and caps huge values', () => {
+    expect(storedZoom(null, 'expert')).toBeNull();
+    expect(storedZoom('x', 'expert')).toBeNull();
+    expect(storedZoom({ expert: 'big' }, 'expert')).toBeNull();
+    expect(storedZoom({ expert: NaN }, 'expert')).toBeNull();
+    expect(storedZoom({ expert: 0 }, 'expert')).toBeNull();
+    expect(storedZoom({ expert: -2 }, 'expert')).toBeNull();
     expect(storedZoom({ expert: 1e9 }, 'expert')).toBe(4);
+  });
+});
+
+describe('autoZoom (QA round 1: hard / expert tiles below 44 px)', () => {
+  // The UI's layout: tile = (shorter side of the board area - 2 * 8 px margin) / size, max zoom = 62 px / tile.
+  const base = (side: number, size: number) => (side - 16) / size;
+  const zMax = (cell: number) => (62 / cell >= 1.3 ? Math.min(2.6, 62 / cell) : 1);
+  it('opens expert on a 390 px phone zoomed to finger-sized tiles', () => {
+    const b = base(390, 11); // ~34 px
+    expect(b).toBeLessThan(SMALL_CELL);
+    const z = autoZoom(b, zMax(b));
+    expect(z).toBeGreaterThan(1);
+    expect(b * z).toBeCloseTo(TOUCH_CELL, 5);
+  });
+  it('does the same for hard on a 320 px phone', () => {
+    const b = base(320, 9); // ~33.8 px
+    expect(b * autoZoom(b, zMax(b))).toBeCloseTo(TOUCH_CELL, 5);
+  });
+  it('keeps the whole board when the tiles are big enough', () => {
+    expect(autoZoom(base(390, 5), zMax(base(390, 5)))).toBe(1);
+    expect(autoZoom(base(390, 7), zMax(base(390, 7)))).toBe(1);
+    expect(autoZoom(base(390, 9), zMax(base(390, 9)))).toBe(1); // ~41.6 px: close enough, overview wins
+    expect(autoZoom(base(820, 11), zMax(base(820, 11)))).toBe(1); // tablet
+  });
+  it('never exceeds the maximum zoom and never zooms out', () => {
+    expect(autoZoom(10, 2.6)).toBe(2.6);
+    expect(autoZoom(30, 1)).toBe(1);
+    expect(autoZoom(0, 2)).toBe(1);
+    expect(autoZoom(NaN, 2)).toBe(1);
   });
 });

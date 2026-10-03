@@ -190,15 +190,18 @@ function hole(h: Partial<Hole> & Pick<Hole, 'par' | 'start' | 'cup'>): Hole {
 const mover = (cx: number, cy: number, w: number, h: number, dx: number, period: number, phase = 0): Mover => ({ cx, cy, w, h, dx, dy: 0, period, phase });
 
 export const HOLES: Hole[] = [
-  // 1 · Tee off — straight, a sand pocket on each side.
+  // 1 · Tee off — a sand pocket on each side, the cup a little left of the tee line and a bunker along
+  // the back rail. The offset means a plain straight pull never drops, and the back bunker swallows
+  // over-hit putts instead of bouncing them back into the cup, so an ace needs both aim and touch.
   hole({
     par: 2,
     start: { x: 5, y: 13.5 },
-    cup: { x: 5, y: 2.6 },
+    cup: { x: 4.2, y: 2.9 },
     outline: rect(1.5, 0, 7, 16),
     sand: [
       { x: 1.5, y: 5, w: 1.6, h: 3.2 },
       { x: 6.9, y: 5, w: 1.6, h: 3.2 },
+      { x: 1.5, y: 0, w: 7, h: 1 },
     ],
   }),
   // 2 · Dogleg — L-shaped fairway.
@@ -471,13 +474,15 @@ export interface Aim {
 
 /**
  * Slingshot: the shot goes from the pointer back through the anchor (the ball, or wherever the drag
- * started). Pulls inside `minDrag` cancel; power grows linearly up to `maxDrag`.
+ * started). Pulls inside `minDrag` cancel; power grows linearly up to `maxDrag`. When `ball` is given
+ * (a drag that started away from the ball), bringing the pointer back onto the ball cancels as well.
  */
-export function aimFromDrag(anchor: Vec, pointer: Vec, maxDrag = PHYS.maxDrag, minDrag = PHYS.minDrag): Aim {
+export function aimFromDrag(anchor: Vec, pointer: Vec, maxDrag = PHYS.maxDrag, minDrag = PHYS.minDrag, ball?: Vec): Aim {
   const dx = anchor.x - pointer.x;
   const dy = anchor.y - pointer.y;
   const pull = Math.hypot(dx, dy);
-  if (!(pull >= minDrag) || !(maxDrag > minDrag)) return { valid: false, dir: { x: 0, y: -1 }, power: 0, pull };
+  const onBall = ball !== undefined && !(Math.hypot(pointer.x - ball.x, pointer.y - ball.y) >= minDrag);
+  if (!(pull >= minDrag) || !(maxDrag > minDrag) || onBall) return { valid: false, dir: { x: 0, y: -1 }, power: 0, pull };
   const power = Math.max(0.01, Math.min(1, (pull - minDrag) / (maxDrag - minDrag)));
   return { valid: true, dir: { x: dx / pull, y: dy / pull }, power, pull };
 }
@@ -852,9 +857,9 @@ export function scoreTerm(strokes: number, par: number): ScoreTerm {
   return 'overPar';
 }
 
-/** "E", "+3", "−2". */
-export function formatVsPar(diff: number): string {
-  if (diff === 0) return 'E';
+/** "E", "+3", "−2". `even` is the (translated) label for level par. */
+export function formatVsPar(diff: number, even = 'E'): string {
+  if (diff === 0) return even;
   return diff > 0 ? `+${diff}` : `−${-diff}`;
 }
 
@@ -887,6 +892,19 @@ export interface Progress {
   strokes: number;
   /** Where the ball rests on the current hole. */
   ball: Vec;
+}
+
+/**
+ * Commit a finished hole: the scores including it, and the progress to save for the next hole (ball on
+ * its tee, no strokes yet) — or `next: null` once the last hole is done. Saving this the moment the
+ * ball drops means quitting during the sink / result animation can never lose the hole.
+ */
+export function progressAfterHole(p: Pick<Progress, 'diff' | 'hole' | 'scores'>, score: number): { scores: number[]; next: Progress | null } {
+  const scores = p.scores.slice(0, p.hole);
+  scores[p.hole] = score;
+  const nextHole = p.hole + 1;
+  if (nextHole >= HOLES.length) return { scores, next: null };
+  return { scores, next: { diff: p.diff, hole: nextHole, scores: scores.slice(), strokes: 0, ball: { ...HOLES[nextHole].start } } };
 }
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);

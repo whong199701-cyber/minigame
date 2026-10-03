@@ -8,7 +8,6 @@ import {
   FOUND0,
   RANK_LABELS,
   SUIT_GLYPHS,
-  UNSOLVABLE_DEAL,
   Solver,
   applyMoveInPlace,
   autoplayInPlace,
@@ -19,8 +18,10 @@ import {
   encodeMove,
   finishMoves,
   fitsOn,
+  flightPlan,
   hasAnyMove,
   initialState,
+  isAbandonLoss,
   isCascadeLoc,
   isCellLoc,
   isFoundLoc,
@@ -31,6 +32,7 @@ import {
   makeCard,
   maxMoveSize,
   movingCard,
+  parseDealNumber,
   randomDeal,
   rankOf,
   replay,
@@ -73,6 +75,18 @@ interface ModeStats {
   wins: number;
   streak: number;
   bestStreak: number;
+}
+
+/** Everything the win modal shows, captured at the moment of the win (not read back later). */
+interface WinInfo {
+  deal: number;
+  mode: Mode;
+  secs: number;
+  moves: number;
+  hints: number;
+  st: ModeStats;
+  bestT: boolean;
+  bestM: boolean;
 }
 
 const strings = {
@@ -133,6 +147,7 @@ const strings = {
     winsLabel: '胜场',
     streakLabel: '连胜 {n}',
     lockedCell: '本模式不可用',
+    replayDeal: '重玩本局',
   },
   en: {
     rules:
@@ -191,6 +206,7 @@ const strings = {
     winsLabel: 'Wins',
     streakLabel: 'Streak {n}',
     lockedCell: 'Not available in this mode',
+    replayDeal: 'Replay',
   },
 };
 
@@ -313,26 +329,45 @@ function create(ctx: GameContext): GameInstance {
   let win: { cv: CanvasHandle; layer: HTMLElement; raf: number } | null = null;
   let timeouts: number[] = [];
   let modal: ModalHandle | null = null;
+  let edgeRaf = 0;
   let press: {
     id: number;
     x0: number;
     y0: number;
+    /** Viewport coordinates of the press and of the latest move (scrolling changes local ones). */
+    cx0: number;
+    cy0: number;
+    cx: number;
+    cy: number;
+    scroll0: number;
     hit: Hit;
     src: Src | null;
     dragging: boolean;
+    panning: boolean;
     offX: number;
     offY: number;
     cards: CardView[];
     step: number;
   } | null = null;
 
-  const later = (fn: () => void, ms: number): void => {
+  /**
+   * Game "epoch": bumped whenever the board is rebuilt or the deal restarts. Delayed effects that belong to
+   * a particular game (the win celebration and modal, the dead-end modal, auto-play sounds) are scheduled
+   * with `later` and silently dropped once the epoch has moved on, so they can never leak into the next game.
+   */
+  let epoch = 0;
+  const later = (fn: () => void, ms: number, scoped = true): void => {
+    const e = epoch;
     const id = window.setTimeout(() => {
       timeouts = timeouts.filter((x) => x !== id);
-      if (!destroyed) fn();
+      if (destroyed || (scoped && e !== epoch)) return;
+      fn();
     }, ms);
     timeouts.push(id);
   };
+  function newEpoch(): void {
+    epoch++;
+  }
 
   // ── Storage ───────────────────────────────────────────────────────────
 
@@ -389,7 +424,7 @@ function create(ctx: GameContext): GameInstance {
   /** Record a loss for an unfinished saved deal that the player is abandoning. */
   function abandonSaved(): void {
     const s = ctx.storage.get<Saved | null>('saved', null);
-    if (s && isMode(s.mode) && s.counted && Array.isArray(s.groups) && s.groups.length > 0) {
+    if (s && isMode(s.mode) && isAbandonLoss(s)) {
       updateStats(s.mode, (st) => {
         st.streak = 0;
       });
@@ -397,10 +432,11 @@ function create(ctx: GameContext): GameInstance {
     ctx.storage.remove('saved');
   }
 
+  /** True when leaving the current/saved deal would cost the streak (it was played, even if restarted). */
   function hasUnfinished(): boolean {
-    if (playing && !finished) return counted && groups.length > 0;
+    if (playing && !finished) return isAbandonLoss({ counted });
     const s = ctx.storage.get<Saved | null>('saved', null);
-    return !!s && s.counted && Array.isArray(s.groups) && s.groups.length > 0;
+    return !!s && isMode(s.mode) && isAbandonLoss(s);
   }
 
   // ── Timer ─────────────────────────────────────────────────────────────
@@ -505,9 +541,15 @@ function create(ctx: GameContext): GameInstance {
       enterkeyhint: 'go',
     }) as HTMLInputElement;
     const playTyped = () => {
-      const d = parseDealInput(input.value);
-      if (d === null) return;
-      confirmAbandon(() => startDeal(mode, d));
+      const r = parseDealNumber(input.value);
+      if (!r.ok) {
+        ctx.toast(dealError(r.reason));
+        ctx.play('error');
+        ctx.haptic('error');
+        shakeInput(input);
+        return;
+      }
+      confirmAbandon(() => startDeal(mode, r.deal));
     };
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -548,25 +590,14 @@ function create(ctx: GameContext): GameInstance {
     );
   }
 
-  function parseDealInput(raw: string): number | null {
-    const txt = raw.trim().replace(/^#/, '');
-    if (!/^\d{1,6}$/.test(txt)) {
-      ctx.toast(t('invalidDeal'));
-      ctx.play('error');
-      return null;
-    }
-    const d = Number(txt);
-    if (!isValidDeal(d)) {
-      ctx.toast(t('invalidDeal'));
-      ctx.play('error');
-      return null;
-    }
-    if (d === UNSOLVABLE_DEAL) {
-      ctx.toast(t('unsolvableDeal'));
-      ctx.play('error');
-      return null;
-    }
-    return d;
+  function dealError(reason: 'invalid' | 'unsolvable'): string {
+    return t(reason === 'unsolvable' ? 'unsolvableDeal' : 'invalidDeal');
+  }
+
+  function shakeInput(input: HTMLInputElement): void {
+    input.classList.remove('fc-input-bad');
+    void input.offsetWidth;
+    input.classList.add('fc-input-bad');
   }
 
   function confirmAbandon(go: () => void): void {
@@ -778,7 +809,9 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function teardownBoard(): void {
+    newEpoch();
     cancelDrag(false);
+    stopEdgeScroll();
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     ro?.disconnect();
@@ -1100,7 +1133,7 @@ function create(ctx: GameContext): GameInstance {
       v.el.classList.remove('fc-shake');
       void v.el.offsetWidth;
       v.el.classList.add('fc-shake');
-      later(() => v.el.classList.remove('fc-shake'), 360);
+      later(() => v.el.classList.remove('fc-shake'), 360, false); // pure cosmetics: always clean up
     }
   }
 
@@ -1113,9 +1146,16 @@ function create(ctx: GameContext): GameInstance {
 
   // ── Hit testing ───────────────────────────────────────────────────────
 
-  function local(e: PointerEvent): { x: number; y: number } {
+  /** Board-content coordinates (including the board's own scroll offset) of a viewport point. */
+  function localAt(clientX: number, clientY: number): { x: number; y: number } {
     const r = (board as HTMLDivElement).getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top + (board?.scrollTop ?? 0) };
+    return { x: clientX - r.left, y: clientY - r.top + (board?.scrollTop ?? 0) };
+  }
+  function local(e: PointerEvent): { x: number; y: number } {
+    return localAt(e.clientX, e.clientY);
+  }
+  function canScroll(): boolean {
+    return !!board && board.scrollHeight > board.clientHeight + 1;
   }
 
   function colAt(x: number, clampToBoard: boolean): number {
@@ -1181,29 +1221,60 @@ function create(ctx: GameContext): GameInstance {
 
   function onDown(e: PointerEvent): void {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (press || !playing || finished || !board) return;
+    if (press) {
+      // A second finger is ignored; a new press of the *same* pointer means the old one never saw its
+      // pointerup (released outside the window, etc.) — drop the stale press instead of swallowing this one.
+      if (press.id !== e.pointerId) return;
+      cancelDrag(false);
+    }
+    if (!playing || finished || !board || busyOverlay) return;
     const p = local(e);
     const hit = hitTest(p.x, p.y);
     const src = sourceFor(hit);
-    press = { id: e.pointerId, x0: p.x, y0: p.y, hit, src, dragging: false, offX: 0, offY: 0, cards: [], step: 0 };
-    if (src) {
-      try {
-        board.setPointerCapture(e.pointerId);
-      } catch {
-        /* ignore */
-      }
+    press = {
+      id: e.pointerId,
+      x0: p.x,
+      y0: p.y,
+      cx0: e.clientX,
+      cy0: e.clientY,
+      cx: e.clientX,
+      cy: e.clientY,
+      scroll0: board.scrollTop,
+      hit,
+      src,
+      dragging: false,
+      panning: false,
+      offX: 0,
+      offY: 0,
+      cards: [],
+      step: 0,
+    };
+    // Always capture, so the release is seen even off the board (cards: drag; felt: pan / tap).
+    try {
+      board.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
     }
   }
 
   function onMove(e: PointerEvent): void {
-    if (!press || e.pointerId !== press.id || !geo) return;
-    const p = local(e);
-    if (!press.dragging) {
-      if (!press.src) return;
-      if (Math.hypot(p.x - press.x0, p.y - press.y0) < DRAG_THRESHOLD) return;
-      beginDrag(p);
+    if (!press || e.pointerId !== press.id || !geo || !board) return;
+    press.cx = e.clientX;
+    press.cy = e.clientY;
+    if (!press.dragging && !press.panning) {
+      if (Math.hypot(e.clientX - press.cx0, e.clientY - press.cy0) < DRAG_THRESHOLD) return;
+      if (press.src) beginDrag(local(e));
+      else if (canScroll()) press.panning = true;
+      else return;
     }
-    dragTo(p);
+    if (press.panning) {
+      // The board uses touch-action: none (so card drags are never stolen by native panning); a drag on the
+      // felt or on buried cards scrolls a tall board by hand instead.
+      board.scrollTop = press.scroll0 - (e.clientY - press.cy0);
+      return;
+    }
+    dragTo(local(e));
+    updateEdgeScroll();
   }
 
   function onUp(e: PointerEvent): void {
@@ -1214,8 +1285,8 @@ function create(ctx: GameContext): GameInstance {
       return;
     }
     press = null;
-    const p = local(e);
-    if (Math.hypot(p.x - pr.x0, p.y - pr.y0) > 24) return; // a swipe, not a tap
+    if (pr.panning) return;
+    if (Math.hypot(e.clientX - pr.cx0, e.clientY - pr.cy0) > 24) return; // a swipe, not a tap
     onTap(pr.hit);
   }
 
@@ -1225,7 +1296,39 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function onLostCapture(e: PointerEvent): void {
-    if (press && press.dragging && e.pointerId === press.id) cancelDrag(true);
+    if (!press || e.pointerId !== press.id) return;
+    if (press.dragging) cancelDrag(true);
+    else press = null;
+  }
+
+  /** While a card is dragged near the top/bottom edge of a scrollable board, scroll it. */
+  function edgeSpeed(): number {
+    if (!press || !press.dragging || !board || !canScroll()) return 0;
+    const r = board.getBoundingClientRect();
+    const zone = Math.min(48, r.height * 0.15);
+    const up = press.cy - r.top;
+    const down = r.bottom - press.cy;
+    if (up < zone && board.scrollTop > 0) return -Math.ceil(14 * (1 - Math.max(0, up) / zone)) - 1;
+    if (down < zone && board.scrollTop < board.scrollHeight - board.clientHeight) return Math.ceil(14 * (1 - Math.max(0, down) / zone)) + 1;
+    return 0;
+  }
+
+  function updateEdgeScroll(): void {
+    if (edgeRaf || !edgeSpeed()) return;
+    const stepScroll = () => {
+      edgeRaf = 0;
+      const v = edgeSpeed();
+      if (!v || !board || !press) return;
+      board.scrollTop += v;
+      dragTo(localAt(press.cx, press.cy));
+      edgeRaf = requestAnimationFrame(stepScroll);
+    };
+    edgeRaf = requestAnimationFrame(stepScroll);
+  }
+
+  function stopEdgeScroll(): void {
+    if (edgeRaf) cancelAnimationFrame(edgeRaf);
+    edgeRaf = 0;
   }
 
   function beginDrag(p: { x: number; y: number }): void {
@@ -1307,6 +1410,7 @@ function create(ctx: GameContext): GameInstance {
 
   function endDrag(p: { x: number; y: number }): void {
     if (!press) return;
+    stopEdgeScroll();
     const pr = press;
     const m = dropMove(p.x - pr.offX, p.y - pr.offY);
     press = null;
@@ -1326,6 +1430,7 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function cancelDrag(animateBack: boolean): void {
+    stopEdgeScroll();
     if (!press) return;
     const pr = press;
     press = null;
@@ -1345,7 +1450,7 @@ function create(ctx: GameContext): GameInstance {
   // ── Taps ──────────────────────────────────────────────────────────────
 
   function onTap(hit: Hit): void {
-    if (!playing || finished) return;
+    if (!playing || finished || busyOverlay) return;
     cancelHintMarksOnly();
     const src = sourceFor(hit);
     const buried = hit.kind === 'cascade' && hit.idx >= 0 && !src;
@@ -1375,7 +1480,8 @@ function create(ctx: GameContext): GameInstance {
       deselect();
       return;
     }
-    if (dest === cur.from || (isCellLoc(dest) && state.cells[dest - CELL0] !== EMPTY)) {
+    if (dest === cur.from) {
+      // Another card of the same run: adjust how much of it is selected.
       if (src) {
         select(src);
         ctx.play('tap');
@@ -1389,13 +1495,11 @@ function create(ctx: GameContext): GameInstance {
       commit(m);
       return;
     }
-    if (src) {
-      select(src);
-      ctx.play('tap');
-      return;
-    }
+    // Invalid destination (a card it doesn't fit on, an occupied free cell, a wrong foundation…): signal the
+    // error on the selected cards and drop the selection, like classic FreeCell.
+    const moving = groupCards(cur);
     deselect();
-    failMove(chk, m, groupCards(cur));
+    failMove(chk, m, moving);
   }
 
   function smartFrom(src: Src): void {
@@ -1450,23 +1554,22 @@ function create(ctx: GameContext): GameInstance {
         st.played++;
       });
     }
+    const plan = flightPlan(userCards.length, autos.length, fin.length, animating());
     const delays = new Map<number, number>();
-    userCards.forEach((c, k) => delays.set(c, k * 22));
-    const base = 170 + userCards.length * 22;
-    autoCards.forEach((c, j) => delays.set(c, base + j * (j < autos.length ? 85 : 60)));
+    userCards.forEach((c, k) => delays.set(c, plan.user[k]));
+    autoCards.forEach((c, j) => delays.set(c, plan.auto[j]));
     placeAll(true, delays);
     ctx.play(isFoundLoc(m.to) ? 'place' : 'move');
     ctx.haptic('light');
-    if (autos.length) later(() => ctx.play('pop'), base);
-    if (fin.length) later(() => ctx.play('swoosh'), base + autos.length * 85);
+    if (plan.popAt >= 0) later(() => ctx.play('pop'), plan.popAt);
+    if (plan.swooshAt >= 0) later(() => ctx.play('swoosh'), plan.swooshAt);
     updateHud();
     save();
-    const settle = base + autoCards.length * 85 + 350;
     if (isWon(state)) {
-      onWin(settle);
+      onWin(plan.settle);
     } else if (!hasAnyMove(state)) {
       later(() => {
-        if (finished || hasAnyMove(state)) return;
+        if (finished || busyOverlay || hasAnyMove(state)) return;
         ctx.play('lose');
         ctx.haptic('error');
         modal = ctx.showModal({
@@ -1477,12 +1580,17 @@ function create(ctx: GameContext): GameInstance {
             { label: t('undo'), primary: true, onClick: () => undo() },
           ],
         });
-      }, settle);
+      }, plan.settle);
     }
   }
 
+  /** Whether card moves are animated right now (placeAll skips flights under reduced motion / when hidden). */
+  function animating(): boolean {
+    return visible && !reducedMotion;
+  }
+
   function undo(): void {
-    if (!playing || finished) return;
+    if (!playing || finished || busyOverlay) return;
     cancelDrag(false);
     if (!groups.length) {
       ctx.toast(t('nothingToUndo'));
@@ -1501,11 +1609,9 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function askRestart(): void {
-    if (!playing) return;
+    if (!playing || busyOverlay) return;
     if (finished) {
-      // Replay a solved deal from the start as a fresh game.
-      counted = false;
-      doRestart();
+      replaySolved();
       return;
     }
     if (!groups.length) return;
@@ -1516,8 +1622,16 @@ function create(ctx: GameContext): GameInstance {
     });
   }
 
+  /** Play a solved deal again from the start, as a fresh game. */
+  function replaySolved(): void {
+    if (!playing || !finished) return;
+    counted = false;
+    doRestart();
+  }
+
   function doRestart(): void {
-    if (!playing) return;
+    if (!playing || busyOverlay) return;
+    newEpoch(); // drop the pending win celebration / modal, dead-end modal and auto-play sounds
     cancelDrag(false);
     cancelHint();
     deselect();
@@ -1537,8 +1651,10 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function openNewDealModal(): void {
-    if (!playing) return;
+    if (!playing || busyOverlay) return;
     cancelDrag(false);
+    // The player chose to move on: a still-pending win / dead-end modal must not pop up over this one.
+    newEpoch();
     let pending: Mode = gameMode;
     const input = el('input', {
       class: 'fc-input',
@@ -1550,17 +1666,34 @@ function create(ctx: GameContext): GameInstance {
       'aria-label': t('dealPlaceholder'),
       enterkeyhint: 'go',
     }) as HTMLInputElement;
+    const err = el('p', { class: 'fc-input-err', role: 'alert' });
+    let handle: ModalHandle | null = null;
     const go = () => {
       const raw = input.value.trim();
       let d: number | null = null;
       if (raw) {
-        d = parseDealInput(raw);
-        if (d === null) return;
+        const r = parseDealNumber(raw);
+        if (!r.ok) {
+          // Keep the dialog (mode + typed text) open and explain inline.
+          err.textContent = dealError(r.reason);
+          ctx.play('error');
+          ctx.haptic('error');
+          shakeInput(input);
+          input.focus();
+          input.select();
+          return;
+        }
+        d = r.deal;
       }
+      handle?.close();
       mode = pending;
       ctx.storage.set('mode', pending);
       startDeal(pending, d);
     };
+    input.addEventListener('input', () => {
+      err.textContent = '';
+      input.classList.remove('fc-input-bad');
+    });
     const desc = el('p', { class: 'fc-note', text: t(MODE_KEY[pending] + 'Desc') });
     const body = el(
       'div',
@@ -1574,18 +1707,24 @@ function create(ctx: GameContext): GameInstance {
         },
       ),
     );
-    body.append(desc, el('p', { class: 'fc-note', text: t('newDealPrompt') }), input);
-    if (!finished && counted && groups.length > 0) body.append(el('p', { class: 'fc-note', text: '⚠️ ' + t('abandonNote') }));
-    const handle = ctx.showModal({
-      title: t('newDeal'),
-      body,
-      buttons: [{ label: t('cancel') }, { label: t('dealGo'), primary: true, onClick: go }],
-    });
+    body.classList.add('fc-newdeal');
+    body.append(desc, el('p', { class: 'fc-note', text: t('newDealPrompt') }), input, err);
+    if (hasUnfinished()) body.append(el('p', { class: 'fc-note', text: '⚠️ ' + t('abandonNote') }));
+    // The shell's modal buttons always close the dialog first, so this one brings its own action row and
+    // only closes once the input is valid.
+    body.append(
+      el(
+        'div',
+        { class: 'modal-actions fc-modal-actions' },
+        button(t('cancel'), () => handle?.close(), { variant: 'secondary', size: 'lg' }),
+        button(t('dealGo'), go, { variant: 'primary', size: 'lg' }),
+      ),
+    );
+    handle = ctx.showModal({ title: t('newDeal'), body, buttons: [] });
     modal = handle;
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        handle.close();
         go();
       }
     });
@@ -1681,7 +1820,7 @@ function create(ctx: GameContext): GameInstance {
   }
 
   function hint(): void {
-    if (!playing || finished || hintJob) return;
+    if (!playing || finished || hintJob || busyOverlay) return;
     cancelDrag(false);
     const cached = cachedHint();
     if (cached) {
@@ -1753,21 +1892,32 @@ function create(ctx: GameContext): GameInstance {
       s.streak++;
       s.bestStreak = Math.max(s.bestStreak, s.streak);
     });
-    const newBestTime = ctx.storage.recordBest(gameMode, secs, 'lower');
-    const newBestMoves = ctx.storage.recordBest(gameMode + '-moves', moves, 'lower');
+    const info: WinInfo = {
+      deal,
+      mode: gameMode,
+      secs,
+      moves,
+      hints,
+      st,
+      bestT: ctx.storage.recordBest(gameMode, secs, 'lower'),
+      bestM: ctx.storage.recordBest(gameMode + '-moves', moves, 'lower'),
+    };
     updateHud();
     if (hudTime) hudTime.textContent = formatTime(secs);
+    // Both are epoch-scoped: a restart / new deal before they fire cancels them.
     later(() => {
       ctx.play('win');
       ctx.haptic('success');
       celebrate();
     }, Math.max(0, delay - 250));
-    later(() => showWinModal(secs, moves, st, newBestTime, newBestMoves), delay + (reducedMotion ? 300 : 1700));
+    later(() => showWinModal(info), delay + (animating() ? 1700 : 300));
   }
 
-  function showWinModal(secs: number, moves: number, st: ModeStats, bestT: boolean, bestM: boolean): void {
-    const bt = ctx.storage.getBest(gameMode);
-    const bm = ctx.storage.getBest(gameMode + '-moves');
+  function showWinModal(w: WinInfo): void {
+    if (!finished || w.deal !== deal || w.mode !== gameMode) return;
+    const { secs, moves, st, bestT, bestM } = w;
+    const bt = ctx.storage.getBest(w.mode);
+    const bm = ctx.storage.getBest(w.mode + '-moves');
     const tile = (v: string, l: string, sub: string, isNew: boolean) =>
       el(
         'div',
@@ -1779,7 +1929,7 @@ function create(ctx: GameContext): GameInstance {
     const body = el(
       'div',
       { class: 'fc-modal-body' },
-      el('p', { text: t('winBody', { deal, mode: t(MODE_KEY[gameMode]) }) }),
+      el('p', { text: t('winBody', { deal: w.deal, mode: t(MODE_KEY[w.mode]) }) }),
       el(
         'div',
         { class: 'fc-win-grid' },
@@ -1787,14 +1937,15 @@ function create(ctx: GameContext): GameInstance {
         tile(String(moves), t('moves'), t('bestLabel', { v: bm === null ? '—' : String(bm) }), bestM),
         tile(`${st.wins}/${st.played}`, t('winsLabel'), t('streakLabel', { n: st.streak }), false),
       ),
-      hints ? el('p', { class: 'fc-note', text: t('hintsUsed', { n: hints }) }) : null,
+      w.hints ? el('p', { class: 'fc-note', text: t('hintsUsed', { n: w.hints }) }) : null,
     );
     modal = ctx.showModal({
       title: t('congratulations'),
       body,
       buttons: [
         { label: t('home'), onClick: () => ctx.exit() },
-        { label: t('newDeal'), primary: true, onClick: () => startDeal(gameMode, null) },
+        { label: t('replayDeal'), onClick: () => replaySolved() },
+        { label: t('newDeal'), primary: true, onClick: () => startDeal(w.mode, null) },
       ],
     });
   }
@@ -1909,7 +2060,7 @@ function create(ctx: GameContext): GameInstance {
   // ── Keyboard (bonus) ──────────────────────────────────────────────────
 
   function onKey(e: KeyboardEvent): void {
-    if (!playing || finished) return;
+    if (!playing || finished || busyOverlay) return;
     const tag = (e.target as HTMLElement | null)?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
     if (document.querySelector('.modal-backdrop.open')) return;

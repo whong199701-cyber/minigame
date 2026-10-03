@@ -1,6 +1,6 @@
 import type { GameContext, GameInstance, GameModule, SoundName, ThemeName } from '../../app/types';
 import { el, button, segmented } from '../../app/ui';
-import { clamp, createCanvas, createLoop, onPointer, seededRandom, type CanvasHandle, type PointerInfo } from '../../app/canvas';
+import { clamp, createCanvas, createLoop, onPointer, roundRect, seededRandom, type CanvasHandle, type PointerInfo } from '../../app/canvas';
 import {
   BALL_R,
   CUP_R,
@@ -18,6 +18,7 @@ import {
   newSim,
   pointInPoly,
   predictPath,
+  progressAfterHole,
   scoreTerm,
   shoot,
   stepSim,
@@ -38,7 +39,7 @@ import './style.css';
 const strings = {
   zh: {
     rules:
-      '像弹弓一样向后拖动、松手推杆：可按住球拖，也可在球场任意处按下拖动。虚线指方向，球周光环与顶部力度条显示力量；拖回起点即取消。\n球停稳后才能再击球。球心经过球洞且速度适中才会落袋，太快会飞过。\n沙地很慢；落水罚 1 杆并回到上次停球处；黄色箭头带会推球（有的是侧风）；移动挡板要掐时机；橙色弹珠会弹开球。\n每洞最多 8 杆，仍未进洞记 9 杆并进入下一洞。进度自动保存。\n目标：18 洞总杆数越少越好，低于标准杆即为高手。\n休闲：预测首次反弹路线，球洞宽容，沙地较松。\n标准：只显示方向虚线。\n职业：只有短箭头，须轻推入洞，沙地更黏。',
+      '像弹弓一样向后拖动、松手推杆：可按住球拖，也可在球场任意处按下拖动。虚线指方向，球周光环与顶部力度条显示力量；拖回起点或拖回球上即取消。\n球停稳后才能再击球。球心经过球洞且速度适中才会落袋，太快会飞过。\n沙地很慢；落水罚 1 杆并回到上次停球处；黄色箭头带会推球（有的是侧风）；移动挡板要掐时机；橙色弹珠会弹开球。\n每洞最多 8 杆，仍未进洞记 9 杆并进入下一洞。进度自动保存。\n目标：18 洞总杆数越少越好，低于标准杆即为高手。\n休闲：预测首次反弹路线，球洞宽容，沙地较松。\n标准：只显示方向虚线。\n职业：只有短虚线箭头，须轻推入洞，沙地更黏。',
     desc: '18 洞物理推杆：弹弓式拖拽，沙坑、水塘、弹珠、侧风与移动挡板。',
     casual: '休闲',
     standard: '标准',
@@ -72,6 +73,8 @@ const strings = {
     doubleBogey: '双柏忌',
     tripleBogey: '三柏忌',
     overPar: '超 {n} 杆',
+    even: '平',
+    parShort: '标{n}',
     strokesN: '{n} 杆',
     scorecard: '记分卡',
     roundDone: '18 洞完成！',
@@ -103,7 +106,7 @@ const strings = {
   },
   en: {
     rules:
-      'Pull back like a slingshot and let go to putt — from the ball, or press anywhere on the course and drag. The dotted line shows direction; the ring and top bar show power. Drag back to your start point to cancel.\nPutt only when the ball has stopped. It drops if its centre crosses the cup at moderate speed; too fast and it skips over.\nSand is slow; water costs 1 stroke and returns the ball to where it last stopped; yellow arrows push the ball (some sideways); time the moving gates; orange bumpers bounce.\nMax 8 strokes per hole, otherwise it scores 9. Progress is saved.\nGoal: the lowest 18-hole total — beat par.\nCasual: first-bounce path preview, forgiving cup, softer sand.\nStandard: direction line only.\nPro: short arrow only, gentle touch to sink, stickier sand.',
+      'Pull back like a slingshot and let go to putt — from the ball, or press anywhere on the course and drag. The dotted line shows direction; the ring and top bar show power. Drag back to your start point or onto the ball to cancel.\nPutt only when the ball has stopped. It drops if its centre crosses the cup at moderate speed; too fast and it skips over.\nSand is slow; water costs 1 stroke and returns the ball to where it last stopped; yellow arrows push the ball (some sideways); time the moving gates; orange bumpers bounce.\nMax 8 strokes per hole, otherwise it scores 9. Progress is saved.\nGoal: the lowest 18-hole total — beat par.\nCasual: first-bounce path preview, forgiving cup, softer sand.\nStandard: direction line only.\nPro: short dotted arrow only, gentle touch to sink, stickier sand.',
     desc: '18 holes of physics putting: slingshot drag, bunkers, water, bumpers, crosswinds and moving gates.',
     casual: 'Casual',
     standard: 'Standard',
@@ -137,6 +140,8 @@ const strings = {
     doubleBogey: 'Double bogey',
     tripleBogey: 'Triple bogey',
     overPar: '+{n}',
+    even: 'E',
+    parShort: 'P{n}',
     strokesN: '{n} strokes',
     scorecard: 'Scorecard',
     roundDone: 'Round complete!',
@@ -306,6 +311,8 @@ function create(ctx: GameContext): GameInstance {
   let scale = 30;
   let ox = 0;
   let oy = 0;
+  /** Wide (landscape) areas draw the course turned 90° clockwise: tee on the left, cup on the right. */
+  let rot = false;
   const trail: Vec[] = [];
   const particles: Particle[] = [];
   const bumperHit: number[] = [];
@@ -340,6 +347,9 @@ function create(ctx: GameContext): GameInstance {
     lastSfx[key] = now;
     ctx.play(name);
   };
+
+  /** Score versus par with the localised "even" label. */
+  const fmtVs = (d: number) => formatVsPar(d, t('even'));
 
   // Timers
   const timers = new Set<number>();
@@ -378,7 +388,8 @@ function create(ctx: GameContext): GameInstance {
     return isValidProgress(p) ? p : null;
   }
   function saveProgress(): void {
-    if (!sim || phase === 'done' || phase === 'start') return;
+    // Only while a hole is in play: once a hole is committed the save already points at the next tee.
+    if (!sim || phase !== 'play') return;
     const p: Progress = { diff, hole: holeIdx, scores: scores.slice(), strokes: sim.strokes, ball: { ...sim.lastRest } };
     ctx.storage.set('progress', p);
   }
@@ -430,7 +441,7 @@ function create(ctx: GameContext): GameInstance {
     const bestLine = el('p', { class: 'muted small' });
     const updateBest = () => {
       const b = ctx.storage.getBest(diff);
-      bestLine.textContent = b === null ? t('noBest') : t('bestTotal', { n: b, d: formatVsPar(b - totalPar()) });
+      bestLine.textContent = b === null ? t('noBest') : t('bestTotal', { n: b, d: fmtVs(b - totalPar()) });
     };
     updateBest();
 
@@ -558,10 +569,37 @@ function create(ctx: GameContext): GameInstance {
 
   function layout(w: number, h: number): void {
     const pad = 12;
-    scale = Math.max(1, Math.min((w - pad * 2) / FIELD_W, (h - pad * 2) / FIELD_H));
-    ox = (w - FIELD_W * scale) / 2;
-    oy = (h - FIELD_H * scale) / 2;
+    // Plus room (in course units) for the rails' outer half and their shadow, which grow with the scale.
+    const rail = 0.25;
+    const fw = FIELD_W + rail * 2;
+    const fh = FIELD_H + rail * 2;
+    const upright = Math.min((w - pad * 2) / fw, (h - pad * 2) / fh);
+    const turned = Math.min((w - pad * 2) / fh, (h - pad * 2) / fw);
+    // Turn the course only when that draws it clearly bigger (landscape phones, tablets, desktop).
+    const nextRot = turned > upright * 1.15;
+    if (nextRot !== rot) {
+      rot = nextRot;
+      cancelDrag();
+      if (sim) litFaces = computeLitFaces(hole);
+    }
+    scale = Math.max(1, rot ? turned : upright);
+    ox = (w - (rot ? FIELD_H : FIELD_W) * scale) / 2;
+    oy = (h - (rot ? FIELD_W : FIELD_H) * scale) / 2;
+    placeHint();
     if (sim) draw();
+  }
+
+  /** Keep the coaching pill off the course: below it when there is room, else in the side margin. */
+  function placeHint(): void {
+    if (!hintEl) return;
+    const side = oy < 44 && ox >= 120;
+    hintEl.classList.toggle('mg-hint-side', side);
+    hintEl.style.maxWidth = side ? `${Math.floor(ox - 24)}px` : '';
+  }
+
+  /** A screen-space direction (light, shadow offset, "up" for the flag) expressed in course units. */
+  function sv(x: number, y: number): Vec {
+    return rot ? { x: y, y: -x } : { x, y };
   }
 
   /** Extend a zone's drawn rectangle under walls / later-drawn zones so its rounded corners never show felt. */
@@ -630,7 +668,7 @@ function create(ctx: GameContext): GameInstance {
     hud.strokes.textContent = String(sim.strokes);
     hud.strokes.className = 'stat-value' + (sim.strokes >= cfg.maxStrokes - 1 ? ' mg-over' : '');
     const d = vsPar(scores);
-    hud.total.textContent = formatVsPar(d);
+    hud.total.textContent = fmtVs(d);
     hud.total.className = 'stat-value' + (d < 0 ? ' mg-under' : d > 0 ? ' mg-over' : '');
     const best = getHoleBest(holeIdx);
     ctx.setStatus(t('statusLine', { n: holeIdx + 1, total: HOLE_COUNT, par: hole.par }) + (best !== null ? t('statusBest', { b: best }) : ''));
@@ -648,6 +686,7 @@ function create(ctx: GameContext): GameInstance {
 
   // ── Input ─────────────────────────────────────────────────────────────
   function toUnits(x: number, y: number): Vec {
+    if (rot) return { x: (y - oy) / scale, y: FIELD_H - (x - ox) / scale };
     return { x: (x - ox) / scale, y: (y - oy) / scale };
   }
 
@@ -661,7 +700,8 @@ function create(ctx: GameContext): GameInstance {
   function computeAim(): void {
     if (!sim) return;
     const r = dragRange();
-    aim = aimFromDrag(anchor, pointer, r.max, r.min);
+    // A drag that started away from the ball also cancels when brought back onto the ball.
+    aim = aimFromDrag(anchor, pointer, r.max, r.min, anchorOnBall ? undefined : sim.ball);
     if (powerFill) {
       const p = aim.valid ? aim.power : 0;
       powerFill.style.width = `${Math.round(p * 100)}%`;
@@ -727,6 +767,13 @@ function create(ctx: GameContext): GameInstance {
     if (sim && phase === 'play') {
       const wasMoving = sim.moving;
       const events = stepSim(sim, hole, cfg, dt);
+      if (dragging && sim.moving) {
+        // A moving block shoved the resting ball mid-aim: that aim is void, say so instead of
+        // silently ignoring the release.
+        cancelDrag();
+        ctx.haptic('error');
+        sfx('error', 'aimLost', 600);
+      }
       if (sim.moving) {
         trail.push({ x: sim.ball.x, y: sim.ball.y });
         if (trail.length > 14) trail.shift();
@@ -839,21 +886,47 @@ function create(ctx: GameContext): GameInstance {
     const score = holeScore(sim.strokes, true, cfg);
     burst(hole.cup.x, hole.cup.y, 12, pal.warning, 3);
     if (score < hole.par) burst(hole.cup.x, hole.cup.y, 26, [pal.warning, pal.success, pal.accent, pal.flag, '#ffffff'], 5, 0.9);
+    // Commit straight away: leaving during the drop animation must not cost the sunk putt.
+    const res = commitHole(score);
     updateHud();
-    after(420, () => finishHole(score));
+    after(420, () => presentHole(score, res));
+  }
+
+  interface HoleResult {
+    isBest: boolean;
+    isBestRound: boolean;
+    last: boolean;
+  }
+
+  /** Record a finished hole: its score, the per-hole best, and the saved progress (or the round best). */
+  function commitHole(score: number): HoleResult {
+    const r = progressAfterHole({ diff, hole: holeIdx, scores }, score);
+    scores = r.scores;
+    const isBest = recordHoleBest(holeIdx, score);
+    let isBestRound = false;
+    if (r.next) ctx.storage.set('progress', r.next);
+    else {
+      ctx.storage.remove('progress');
+      isBestRound = ctx.storage.recordBest(diff, sumScores(scores), 'lower');
+    }
+    return { isBest, isBestRound, last: !r.next };
   }
 
   function finishHole(score: number): void {
     if (!sim) return;
+    presentHole(score, commitHole(score));
+  }
+
+  /** Result banner + sounds for a committed hole, then move on. */
+  function presentHole(score: number, res: HoleResult): void {
+    if (!sim) return;
     phase = 'transition';
     cancelDrag();
-    scores[holeIdx] = score;
     const term = scoreTerm(score, hole.par);
     const diffN = score - hole.par;
-    const isBest = recordHoleBest(holeIdx, score);
     const title = term === 'overPar' ? t('overPar', { n: diffN }) : t(term);
-    let sub = `${t('strokesN', { n: score })} · ${t('parN', { n: hole.par })} · ${formatVsPar(diffN)}`;
-    if (isBest) sub += ` · ${t('holeBestNote')}`;
+    let sub = `${t('strokesN', { n: score })} · ${t('parN', { n: hole.par })} · ${fmtVs(diffN)}`;
+    if (res.isBest) sub += ` · ${t('holeBestNote')}`;
     const kind = term === 'holeInOne' ? 'mg-ace' : diffN < 0 ? 'mg-good' : diffN > 1 ? 'mg-bad' : '';
     if (term === 'holeInOne') {
       ctx.play('win');
@@ -861,17 +934,8 @@ function create(ctx: GameContext): GameInstance {
     } else if (diffN < 0) ctx.play('success');
     showBanner(title, sub, kind, 1750);
     updateHud();
-    const last = holeIdx + 1 >= HOLE_COUNT;
-    if (last) {
-      // Commit the result now, so leaving during the banner cannot lose the round.
-      ctx.storage.remove('progress');
-      const isBestRound = ctx.storage.recordBest(diff, sumScores(scores), 'lower');
-      after(1850, () => finishRound(isBestRound));
-    } else {
-      const next = HOLES[holeIdx + 1];
-      ctx.storage.set('progress', { diff, hole: holeIdx + 1, scores: scores.slice(), strokes: 0, ball: { ...next.start } } satisfies Progress);
-      after(1850, () => loadHole(holeIdx + 1));
-    }
+    if (res.last) after(1850, () => finishRound(res.isBestRound));
+    else after(1850, () => loadHole(holeIdx + 1));
   }
 
   function finishRound(isBest: boolean): void {
@@ -904,7 +968,7 @@ function create(ctx: GameContext): GameInstance {
           { class: cls },
           el('span', { class: 'mg-cell-h', text: String(i + 1) }),
           el('span', { class: 'mg-cell-s', text: s === undefined ? '–' : String(s) }),
-          el('span', { class: 'mg-cell-p', text: `P${h.par}` + (typeof hb === 'number' ? ` · ★${hb}` : '') }),
+          el('span', { class: 'mg-cell-p', text: t('parShort', { n: h.par }) + (typeof hb === 'number' ? ` · ★${hb}` : '') }),
         ),
       );
     });
@@ -922,8 +986,8 @@ function create(ctx: GameContext): GameInstance {
       el('p', { class: 'mg-card-legend muted', text: `★ = ${t('cellBest')}` }),
       row(t('totalStrokes'), String(total)),
       row(t('courseParLabel'), String(parSoFar)),
-      row(t('vsParLabel'), formatVsPar(d), d < 0 ? 'mg-under' : d > 0 ? 'mg-over' : ''),
-      best !== null ? row(t('bestRound'), t('bestValue', { n: best, d: formatVsPar(best - totalPar()) })) : null,
+      row(t('vsParLabel'), fmtVs(d), d < 0 ? 'mg-under' : d > 0 ? 'mg-over' : ''),
+      best !== null ? row(t('bestRound'), t('bestValue', { n: best, d: fmtVs(best - totalPar()) })) : null,
       isBest ? el('p', { class: 'mg-newbest', text: '🏆 ' + t('newBest') }) : null,
     );
   }
@@ -988,8 +1052,10 @@ function create(ctx: GameContext): GameInstance {
   /** Wall edges facing the light, shifted onto the face side of the rail (computed once per hole). */
   function computeLitFaces(h: Hole): { a: Vec; b: Vec }[] {
     const out: { a: Vec; b: Vec }[] = [];
-    const lx = -0.45;
-    const ly = -0.9;
+    // Light from the top-left of the screen, whichever way the course is turned.
+    const light = sv(-0.45, -0.9);
+    const lx = light.x;
+    const ly = light.y;
     const polys: { p: Vec[]; faceInside: boolean }[] = [{ p: h.outline, faceInside: true }, ...h.blocks.map((p) => ({ p, faceInside: false }))];
     for (const { p, faceInside } of polys) {
       for (let i = 0; i < p.length; i++) {
@@ -1030,13 +1096,21 @@ function create(ctx: GameContext): GameInstance {
     g.fillRect(0, 0, W, H);
     g.save();
     g.translate(ox, oy);
+    if (rot) {
+      g.translate(FIELD_H * scale, 0);
+      g.rotate(Math.PI / 2);
+    }
     g.scale(scale, scale);
     g.lineJoin = 'round';
     g.lineCap = 'round';
+    // Screen-relative offsets (shadows fall down-right, highlights sit top-left) in course units.
+    const shOff = sv(0.06, 0.08);
+    const hiOff = sv(-1, -1);
 
     // Drop shadow under the course.
     g.save();
-    g.translate(0.12, 0.18);
+    const courseSh = sv(0.12, 0.18);
+    g.translate(courseSh.x, courseSh.y);
     g.fillStyle = pal.shadow;
     tracePoly(g, hole.outline);
     g.fill();
@@ -1057,8 +1131,7 @@ function create(ctx: GameContext): GameInstance {
 
     // Tee mat with its tee spot.
     g.fillStyle = pal.tee;
-    g.beginPath();
-    g.roundRect(hole.start.x - 0.55, hole.start.y - 0.38, 1.1, 0.76, 0.16);
+    roundRect(g, hole.start.x - 0.55, hole.start.y - 0.38, 1.1, 0.76, 0.16);
     g.fill();
     g.fillStyle = pal.stripe;
     g.beginPath();
@@ -1068,8 +1141,7 @@ function create(ctx: GameContext): GameInstance {
     // Sand
     g.fillStyle = pal.sand;
     for (const s of zoneDraw.sand) {
-      g.beginPath();
-      g.roundRect(s.x, s.y, s.w, s.h, 0.3);
+      roundRect(g, s.x, s.y, s.w, s.h, 0.3);
       g.fill();
     }
     g.fillStyle = pal.sandDot;
@@ -1082,8 +1154,7 @@ function create(ctx: GameContext): GameInstance {
     // Water
     for (const w of zoneDraw.water) {
       g.save();
-      g.beginPath();
-      g.roundRect(w.x, w.y, w.w, w.h, 0.25);
+      roundRect(g, w.x, w.y, w.w, w.h, 0.25);
       g.clip();
       g.fillStyle = pal.water;
       g.fillRect(w.x, w.y, w.w, w.h);
@@ -1106,8 +1177,7 @@ function create(ctx: GameContext): GameInstance {
     hole.boosters.forEach((b, i) => {
       const d = zoneDraw.boost[i] ?? b;
       g.save();
-      g.beginPath();
-      g.roundRect(d.x, d.y, d.w, d.h, 0.22);
+      roundRect(g, d.x, d.y, d.w, d.h, 0.22);
       g.clip();
       g.fillStyle = pal.boost;
       g.fillRect(d.x, d.y, d.w, d.h);
@@ -1142,7 +1212,7 @@ function create(ctx: GameContext): GameInstance {
     for (const m of hole.movers) {
       const r = moverRect(m, sim.time);
       g.fillStyle = pal.shadow;
-      g.fillRect(r.x + 0.08, r.y + 0.1, r.w, r.h);
+      g.fillRect(r.x + shOff.x * 1.3, r.y + shOff.y * 1.3, r.w, r.h);
       g.save();
       g.fillStyle = pal.wall;
       g.fillRect(r.x, r.y, r.w, r.h);
@@ -1168,12 +1238,12 @@ function create(ctx: GameContext): GameInstance {
     hole.bumpers.forEach((b, i) => {
       g.fillStyle = pal.shadow;
       g.beginPath();
-      g.arc(b.x + 0.06, b.y + 0.08, b.r, 0, Math.PI * 2);
+      g.arc(b.x + shOff.x, b.y + shOff.y, b.r, 0, Math.PI * 2);
       g.fill();
       const age = clock - (bumperHit[i] ?? -10);
       const pulse = age < 0.15 ? 1 + 0.12 * (1 - age / 0.15) : 1;
       const rr = b.r * pulse;
-      const grad = g.createRadialGradient(b.x - rr * 0.3, b.y - rr * 0.3, rr * 0.1, b.x, b.y, rr);
+      const grad = g.createRadialGradient(b.x + hiOff.x * rr * 0.3, b.y + hiOff.y * rr * 0.3, rr * 0.1, b.x, b.y, rr);
       grad.addColorStop(0, pal.bumperCore);
       grad.addColorStop(1, pal.bumper);
       g.fillStyle = grad;
@@ -1200,7 +1270,7 @@ function create(ctx: GameContext): GameInstance {
     g.beginPath();
     g.arc(cx, cy, CUP_R + 0.06, 0, Math.PI * 2);
     g.fill();
-    const cg = g.createRadialGradient(cx + 0.06, cy + 0.08, CUP_R * 0.1, cx, cy, CUP_R);
+    const cg = g.createRadialGradient(cx + shOff.x, cy + shOff.y, CUP_R * 0.1, cx, cy, CUP_R);
     cg.addColorStop(0, pal.cup);
     cg.addColorStop(1, pal.cupRim);
     g.fillStyle = cg;
@@ -1246,10 +1316,11 @@ function create(ctx: GameContext): GameInstance {
       if (!sim.sunk) {
         g.fillStyle = pal.shadow;
         g.beginPath();
-        g.ellipse(bx + 0.06, by + 0.08, BALL_R * 1.05, BALL_R * 0.9, 0, 0, Math.PI * 2);
+        g.ellipse(bx + shOff.x, by + shOff.y, BALL_R * (rot ? 0.9 : 1.05), BALL_R * (rot ? 1.05 : 0.9), 0, 0, Math.PI * 2);
         g.fill();
       }
-      const grad = g.createRadialGradient(bx - BALL_R * 0.35 * s, by - BALL_R * 0.35 * s, BALL_R * 0.1 * s, bx, by, BALL_R * s);
+      const hk = BALL_R * 0.35 * s;
+      const grad = g.createRadialGradient(bx + hiOff.x * hk, by + hiOff.y * hk, BALL_R * 0.1 * s, bx, by, BALL_R * s);
       grad.addColorStop(0, pal.ball);
       grad.addColorStop(1, pal.ballShade);
       g.fillStyle = grad;
@@ -1258,19 +1329,26 @@ function create(ctx: GameContext): GameInstance {
       g.fill();
     }
 
-    // Flag (drawn above the ball so it reads as standing up).
+    // Flag (drawn above the ball so it reads as standing up — always screen-up, even when turned).
     const wave = Math.sin(clock * 3) * 0.06;
+    const fp = (x: number, y: number): Vec => {
+      const d = sv(x, y);
+      return { x: cx + d.x, y: cy + d.y };
+    };
+    const poleTop = fp(0, -1.45);
+    const flagTip = fp(0.78 + wave, -1.2 + wave * 0.5);
+    const flagLow = fp(0, -0.95);
     g.lineWidth = 0.07;
     g.strokeStyle = pal.pole;
     g.beginPath();
     g.moveTo(cx, cy);
-    g.lineTo(cx, cy - 1.45);
+    g.lineTo(poleTop.x, poleTop.y);
     g.stroke();
     g.fillStyle = pal.flag;
     g.beginPath();
-    g.moveTo(cx, cy - 1.45);
-    g.lineTo(cx + 0.78 + wave, cy - 1.2 + wave * 0.5);
-    g.lineTo(cx, cy - 0.95);
+    g.moveTo(poleTop.x, poleTop.y);
+    g.lineTo(flagTip.x, flagTip.y);
+    g.lineTo(flagLow.x, flagLow.y);
     g.closePath();
     g.fill();
 
@@ -1359,13 +1437,16 @@ function create(ctx: GameContext): GameInstance {
       g.setLineDash([]);
       g.restore();
     } else {
+      // Pro: a short dotted arrow — direction only, no hint of where the ball ends up.
       const len = 1.1;
       const tx = b.x + a.dir.x * len;
       const ty = b.y + a.dir.y * len;
+      g.setLineDash([0.12, 0.15]);
       g.beginPath();
       g.moveTo(b.x + a.dir.x * BALL_R * 1.4, b.y + a.dir.y * BALL_R * 1.4);
       g.lineTo(tx, ty);
       g.stroke();
+      g.setLineDash([]);
       const px = -a.dir.y;
       const py = a.dir.x;
       g.fillStyle = pal.aim;
@@ -1384,8 +1465,10 @@ function create(ctx: GameContext): GameInstance {
     g.arc(b.x, b.y, rr, 0, Math.PI * 2);
     g.stroke();
     g.strokeStyle = a.power < 0.5 ? pal.success : a.power < 0.8 ? pal.warning : pal.danger;
+    const up = sv(0, -1);
+    const a0 = Math.atan2(up.y, up.x); // fills clockwise from the top of the screen
     g.beginPath();
-    g.arc(b.x, b.y, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * a.power);
+    g.arc(b.x, b.y, rr, a0, a0 + Math.PI * 2 * a.power);
     g.stroke();
   }
 

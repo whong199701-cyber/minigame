@@ -58,6 +58,7 @@
   text-align: center;
   padding: 14px 22px;
   border-radius: 18px;
+  background: var(--surface);
   background: color-mix(in srgb, var(--surface) 86%, transparent);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
@@ -108,6 +109,7 @@
   transform: translateX(-50%);
   padding: 6px 14px;
   border-radius: 999px;
+  background: var(--surface);
   background: color-mix(in srgb, var(--surface) 82%, transparent);
   border: 1px solid var(--border);
   color: var(--muted);
@@ -120,6 +122,15 @@
 }
 .mg-hint.mg-show {
   opacity: 1;
+}
+/* No room under the course (landscape): sit in the left margin instead of over the rail. */
+.mg-hint.mg-hint-side {
+  left: 12px;
+  bottom: 12px;
+  transform: none;
+  white-space: normal;
+  text-align: left;
+  border-radius: 14px;
 }
 
 /* Start screen extras */
@@ -226,6 +237,16 @@
 .mg-hud {
   cursor: pointer;
 }
-.mg-hud .stat-value.mg-over {
-  color: var(--danger);
+
+/* Short landscape screens: tighten the HUD so the (turned) course gets the height. */
+@media (max-height: 480px) {
+  .mg-hud {
+    padding: 2px 12px 0;
+  }
+  .mg-hud .stat-value {
+    font-size: 15px;
+  }
+  .mg-power {
+    margin-bottom: 2px;
+  }
 }

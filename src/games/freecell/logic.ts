@@ -88,6 +88,24 @@ export function isValidDeal(deal: number): boolean {
   return Number.isInteger(deal) && deal >= 1 && deal <= MAX_DEAL;
 }
 
+export type DealParse = { ok: true; deal: number } | { ok: false; reason: 'invalid' | 'unsolvable' };
+
+/**
+ * Parse what the player typed as a deal number: "617", " #617 ", full-width "６１７" (CJK IME) are fine;
+ * empty / non-numeric / out of range → 'invalid'; #11982 → 'unsolvable'.
+ */
+export function parseDealNumber(raw: string): DealParse {
+  const txt = raw
+    .replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xff10 + 48))
+    .trim()
+    .replace(/^[#＃]\s*/, '');
+  if (!/^\d{1,6}$/.test(txt)) return { ok: false, reason: 'invalid' };
+  const deal = Number(txt);
+  if (!isValidDeal(deal)) return { ok: false, reason: 'invalid' };
+  if (deal === UNSOLVABLE_DEAL) return { ok: false, reason: 'unsolvable' };
+  return { ok: true, deal };
+}
+
 /** Random deal number in 1..32000, never the unsolvable #11982 (or any number in `exclude`). */
 export function randomDeal(rand: () => number = Math.random, exclude: readonly number[] = []): number {
   for (let tries = 0; tries < 1000; tries++) {
@@ -425,6 +443,63 @@ export function smartMove(s: State, from: number, n: number): Move | null {
     if (i >= 0) return { from, to: CELL0 + i, n: 1 };
   }
   return null;
+}
+
+// ── Session helpers ─────────────────────────────────────────────────────
+
+/**
+ * Whether walking away from a saved/live deal counts as a loss (breaks the win streak). A deal counts once
+ * its first move was made — restarting it back to move 0 does not undo that, otherwise "restart, then new
+ * deal" would be a free escape from a losing position.
+ */
+export function isAbandonLoss(saved: { counted?: unknown } | null | undefined): boolean {
+  return !!saved && typeof saved === 'object' && saved.counted === true;
+}
+
+/** Longest single card flight in ms (see the UI's `placeAll`: 150 + min(170, dist × 0.45)). */
+export const MAX_FLIGHT_MS = 320;
+
+export interface FlightPlan {
+  /** Start delay (ms) of each card of the player's own move, head card first. */
+  user: number[];
+  /** Start delay of each automatic foundation move: safe auto-plays first, then the auto-finish. */
+  auto: number[];
+  /** When the board has come to rest (ms after the move); 0 without animation. */
+  settle: number;
+  /** When to play the auto-play / auto-finish sounds (-1 = none). */
+  popAt: number;
+  swooshAt: number;
+}
+
+/**
+ * Timing for one committed move: the player's cards fly first, then each auto-played card one after the
+ * other (85 ms apart), then the auto-finish cards (60 ms apart) strictly after the last auto-play. Without
+ * animation (reduced motion / hidden page) everything is immediate, so nothing should wait for it.
+ */
+export function flightPlan(userCards: number, autoCount: number, finishCount: number, animated: boolean): FlightPlan {
+  if (!animated) {
+    return {
+      user: new Array<number>(userCards).fill(0),
+      auto: new Array<number>(autoCount + finishCount).fill(0),
+      settle: 0,
+      popAt: autoCount ? 0 : -1,
+      swooshAt: finishCount ? 0 : -1,
+    };
+  }
+  const user = Array.from({ length: userCards }, (_, k) => k * 22);
+  const base = 170 + userCards * 22;
+  const finBase = base + autoCount * 85;
+  const auto: number[] = [];
+  for (let j = 0; j < autoCount; j++) auto.push(base + j * 85);
+  for (let j = 0; j < finishCount; j++) auto.push(finBase + j * 60);
+  const lastStart = auto.length ? auto[auto.length - 1] : user.length ? user[user.length - 1] : 0;
+  return {
+    user,
+    auto,
+    settle: lastStart + MAX_FLIGHT_MS + 30,
+    popAt: autoCount ? base : -1,
+    swooshAt: finishCount ? finBase : -1,
+  };
 }
 
 // ── Persistence helpers ─────────────────────────────────────────────────

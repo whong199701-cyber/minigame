@@ -14,9 +14,12 @@ import {
   cloneState,
   decodeMove,
   encodeMove,
+  MAX_FLIGHT_MS,
   finishMoves,
   fitsOn,
+  flightPlan,
   hasAnyMove,
+  isAbandonLoss,
   isSafeAutoplay,
   isTriviallySolvable,
   isValidDeal,
@@ -26,6 +29,7 @@ import {
   maxMoveSize,
   msDeal,
   newGame,
+  parseDealNumber,
   playSolution,
   randomDeal,
   replay,
@@ -131,6 +135,18 @@ describe('Microsoft deals', () => {
       expect(isValidDeal(d)).toBe(true);
     }
     expect(randomDeal(() => 0, [1])).not.toBe(1);
+  });
+
+  it('parses typed deal numbers and refuses invalid ones', () => {
+    expect(parseDealNumber('617')).toEqual({ ok: true, deal: 617 });
+    expect(parseDealNumber('  #1 ')).toEqual({ ok: true, deal: 1 });
+    expect(parseDealNumber('32000')).toEqual({ ok: true, deal: 32000 });
+    expect(parseDealNumber('\uFF16\uFF11\uFF17')).toEqual({ ok: true, deal: 617 }); // full-width digits (CJK IME)
+    expect(parseDealNumber('\uFF03\uFF12')).toEqual({ ok: true, deal: 2 });
+    for (const bad of ['', '  ', '0', '32001', 'abc', '12a', '-5', '1.5', '1e3', '9999999']) {
+      expect(parseDealNumber(bad)).toEqual({ ok: false, reason: 'invalid' });
+    }
+    expect(parseDealNumber(String(UNSOLVABLE_DEAL))).toEqual({ ok: false, reason: 'unsolvable' });
   });
 
   it('formats cards', () => {
@@ -391,6 +407,47 @@ describe('persistence & undo', () => {
     const d = pos(['KS', 'KD QH', ''], ['AS', ''], [0, 0, 0, 0]);
     expect(stateKey(a)).toBe(stateKey(b));
     expect(stateKey(a)).not.toBe(stateKey(d));
+  });
+});
+
+describe('session helpers', () => {
+  it('counts an abandoned deal as a loss once it was played, even after a restart to move 0', () => {
+    expect(isAbandonLoss(null)).toBe(false);
+    expect(isAbandonLoss(undefined)).toBe(false);
+    expect(isAbandonLoss({ counted: false })).toBe(false); // dealt, never moved
+    expect(isAbandonLoss({ counted: true })).toBe(true);
+    // Restarted: the move list is empty again but the deal was already counted as played.
+    expect(isAbandonLoss({ counted: true, groups: [] } as { counted: boolean })).toBe(true);
+    expect(isAbandonLoss({ counted: 'yes' })).toBe(false); // corrupt save
+  });
+
+  it('sequences auto-play flights and knows when the board settles', () => {
+    const p = flightPlan(2, 3, 4, true);
+    expect(p.user).toEqual([0, 22]);
+    expect(p.auto).toHaveLength(7);
+    for (let i = 1; i < p.auto.length; i++) expect(p.auto[i]).toBeGreaterThan(p.auto[i - 1]);
+    // The auto-finish starts strictly after the last safe auto-play (no overlapping flights).
+    expect(p.auto[3]).toBeGreaterThan(p.auto[2]);
+    expect(p.auto[0]).toBeGreaterThan(p.user[1]);
+    expect(p.settle).toBeGreaterThanOrEqual(p.auto[6] + MAX_FLIGHT_MS);
+    expect(p.popAt).toBe(p.auto[0]);
+    expect(p.swooshAt).toBe(p.auto[3]);
+    const plain = flightPlan(1, 0, 0, true);
+    expect(plain.auto).toEqual([]);
+    expect(plain.settle).toBeGreaterThanOrEqual(MAX_FLIGHT_MS);
+    expect(plain.popAt).toBe(-1);
+    expect(plain.swooshAt).toBe(-1);
+  });
+
+  it('does not wait for animations that reduced motion skips', () => {
+    // A final move that triggers a 45-card auto-finish used to keep a static board on screen for ~4 s.
+    const animated = flightPlan(1, 5, 45, true);
+    expect(animated.settle).toBeGreaterThan(3000);
+    const still = flightPlan(1, 5, 45, false);
+    expect(still.settle).toBe(0);
+    expect(still.auto.every((d) => d === 0)).toBe(true);
+    expect(still.popAt).toBe(0);
+    expect(still.swooshAt).toBe(0);
   });
 });
 

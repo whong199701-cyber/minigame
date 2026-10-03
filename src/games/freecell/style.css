@@ -28,7 +28,7 @@
 .fc-hint-btn {
   flex: none;
   min-width: 76px;
-  min-height: 40px;
+  min-height: 44px;
   padding: 6px 10px;
 }
 .fc-hint-btn .btn-icon {
@@ -81,10 +81,12 @@
   --fc-shadow: 0 1px 2px rgba(20, 40, 30, 0.22), 0 2px 5px rgba(20, 40, 30, 0.12);
   --fc-lift: 0 10px 22px rgba(20, 40, 30, 0.28), 0 2px 6px rgba(20, 40, 30, 0.18);
 }
+/* Tall boards scroll, but touch-action stays none: native panning would cancel vertical card drags.
+   Dragging the felt / buried cards scrolls by hand (see onMove), dragged cards auto-scroll at the edges. */
 .fc-board.fc-scrolly {
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  touch-action: pan-y;
+  overscroll-behavior: contain;
+  touch-action: none;
 }
 .fc-spacer {
   position: absolute;
@@ -425,6 +427,21 @@
 .fc-input::placeholder {
   color: var(--muted);
 }
+.fc-input.fc-input-bad {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 28%, transparent);
+  animation: fc-shake 0.32s ease;
+}
+.fc-input-err {
+  min-height: 0;
+  margin: -4px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+}
+.fc-input-err:empty {
+  display: none;
+}
 .fc-toggle {
   width: 100%;
   max-width: 320px;
@@ -440,6 +457,21 @@
 }
 .fc-modal-body .segmented {
   align-self: flex-start;
+}
+/* The new-deal dialog carries its own action row (it must stay open on invalid input); the shell's empty
+   action row below it takes no space, so cancel the body's bottom margin instead. */
+.fc-modal-body.fc-newdeal {
+  margin-bottom: -14px;
+}
+.fc-modal-actions {
+  margin-top: 6px;
+}
+/* Three buttons in the win dialog: keep labels on one line on 320–390 px phones. */
+.modal-card:has(.fc-win-grid) .modal-actions .btn {
+  padding-left: 8px;
+  padding-right: 8px;
+  white-space: nowrap;
+  min-width: 0;
 }
 .fc-win-grid {
   display: grid;
