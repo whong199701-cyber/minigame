@@ -8,6 +8,7 @@ import {
   GRAB_MIN_PX,
   H,
   HEAD_Y,
+  HINT_BANDS,
   MODES,
   MODE_LIST,
   POCKETS,
@@ -20,6 +21,7 @@ import {
   beginAim,
   findFreeSpot,
   grabRadiusPx,
+  hintBandY,
   insideTable,
   isAtRest,
   isFreeSpot,
@@ -670,5 +672,39 @@ describe('aim gesture', () => {
     expect(g.grab).toBe(false);
     moveAim(g, CX, CY, CX - 30, CY + 1); // finger jumps across the ball
     expect(Math.abs(g.aim - UP)).toBeLessThanOrEqual(0.6 + 1e-9);
+  });
+});
+
+describe('ball-in-hand hint placement', () => {
+  const HW = 40;
+  const HH = 4;
+  const clearOf = (balls: Ball[], y: number) =>
+    balls.slice(1).every((b) => b.pocketed || Math.abs(b.y - y) >= HH + R || Math.abs(b.x - W / 2) >= HW + R);
+
+  it('uses the mid-table band on an empty table and never the bottom-rail area where the toast sits', () => {
+    expect(hintBandY([ball(0, 50, 150)], HW, HH)).toBeCloseTo(H * 0.6, 9);
+    for (const f of HINT_BANDS) expect(f).toBeLessThan(0.8);
+  });
+
+  it('moves off a ball that sits on the preferred band (QA: hint drawn over the 3-ball)', () => {
+    const balls = [ball(0, 50, 150), ball(3, 66, H * 0.6), ball(1, 50, 58), ball(2, 80, 90)];
+    const y = hintBandY(balls, HW, HH);
+    expect(y).not.toBeCloseTo(H * 0.6, 3);
+    expect(clearOf(balls, y)).toBe(true);
+  });
+
+  it('ignores the cue ball (it follows the finger), pocketed balls and balls beside the text', () => {
+    const balls = [ball(0, 50, H * 0.6), ball(1, 50, H * 0.6), ball(2, 3.5, H * 0.6)];
+    balls[1].pocketed = true;
+    expect(hintBandY(balls, HW, HH)).toBeCloseTo(H * 0.6, 9);
+  });
+
+  it('always returns a clear band for real racks and falls back to mid-table when nothing is clear', () => {
+    for (const mode of MODE_LIST) {
+      const g = newGame(mode, seeded(7));
+      expect(clearOf(g.balls, hintBandY(g.balls, HW, HH))).toBe(true);
+    }
+    const crowded = [ball(0, 50, 150), ...HINT_BANDS.map((f, i) => ball(i + 1, 50, H * f))];
+    expect(hintBandY(crowded, HW, HH)).toBeCloseTo(H * HINT_BANDS[0], 9);
   });
 });

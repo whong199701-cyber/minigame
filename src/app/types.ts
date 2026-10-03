@@ -54,6 +54,8 @@ export interface ModalOptions {
   buttons?: ModalButton[];
   /** Tap outside / back closes it. Default true. */
   dismissible?: boolean;
+  /** Called once when the modal closes (by a button or by tapping outside). */
+  onClose?: () => void;
 }
 
 export interface ModalHandle {

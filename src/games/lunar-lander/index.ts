@@ -5,6 +5,9 @@ import {
   CAMPAIGN_LEVELS,
   DT,
   EXHAUST_REACH,
+  FEET,
+  FOOT_PAD,
+  FOOT_X,
   FOOT_Y,
   MAX_TILT,
   MAX_VX,
@@ -22,7 +25,9 @@ import {
   overviewZoom,
   rng,
   sanitizeRun,
+  smoothstep,
   stepLevel,
+  toWorld,
   zoomFor,
   type CrashReason,
   type Input,
@@ -30,130 +35,9 @@ import {
   type Pad,
   type Run,
 } from './logic';
+import { strings } from './strings';
 import './style.css';
 
-const strings = {
-  zh: {
-    rules:
-      '侧视登月：登月舱在重力下坠落，你要把它稳稳放在着陆台上。\n◀ ▶ 旋转姿态，按住 🔥 点火（燃料有限）；按住画面左 / 右半区也能旋转，可以一手推进一手转向。\n安全着陆：垂直速度 < 2.5 m/s，水平速度 < 1.5 m/s，倾角 < 10°，两条腿落在同一个着陆台上。\n着陆台倍率：宽 ×1、中 ×2、窄 ×3。本关得分 = 100 × 倍率 + 剩余燃料% × 2。\n撞上地形、速度过快或倾斜过大都会坠毁，可无限重试本关；↻ 随时重开本关，⏸ 暂停。\n战役 10 关：重力增大、地形更崎岖、着陆台更少更窄、燃料更紧，第 6 关起有侧风；通关后进入无尽模式。\n战役进度自动保存；练习模式可重玩任意已解锁关卡（地形随机）。',
-    desc: '控制推进与姿态，在燃料耗尽前把登月舱轻轻放在着陆台上。',
-    modeCampaign: '战役',
-    modePractice: '练习',
-    campaignInfo: '10 关战役，通关后进入无尽模式',
-    bestCampaign: '战役最佳：{n} 分',
-    bestLevel: '本关最佳：{n} 分',
-    noBest: '尚无纪录',
-    levelN: '第 {n} 关',
-    unlockedN: '已解锁 {n} 关',
-    runProgress: '进行中：第 {n} 关 · 已得 {s} 分',
-    continueRun: '继续 · 第 {n} 关',
-    newCampaign: '新战役',
-    newCampaignConfirm: '放弃当前战役进度（第 {n} 关 · {s} 分）并从第 1 关重新开始？',
-    alt: '高度',
-    vspeed: '垂直',
-    hspeed: '水平',
-    tilt: '倾角',
-    fuel: '燃料',
-    rotateLeft: '左转',
-    rotateRight: '右转',
-    thrust: '推进',
-    restartLevel: '重开本关',
-    menu: '菜单',
-    replay: '重飞',
-    gravityLabel: '重力 {g} m/s²',
-    windLabel: '侧风 {dir} {w} m/s²',
-    noWind: '无风',
-    wind: '风',
-    landedTitle: '着陆成功！',
-    crashedTitle: '坠毁了',
-    padBonus: '着陆台 ×{m}',
-    fuelBonus: '剩余燃料 {f}%',
-    levelScore: '本关得分',
-    campaignTotal: '战役总分',
-    campaignComplete: '战役完成！',
-    campaignCompleteBody: '全部 10 关通关！接下来是无尽模式：重力更大、风更强、燃料更紧。',
-    continueEndless: '无尽模式',
-    reasonTerrain: '落在了崎岖的地面上',
-    reasonOffPad: '有一条腿没有踩在着陆台上',
-    reasonVspeed: '垂直速度过快：{v} m/s（上限 2.5）',
-    reasonHspeed: '水平速度过快：{v} m/s（上限 1.5）',
-    reasonTilt: '倾角过大：{a}°（上限 10°）',
-    reasonHull: '机身撞上了地形',
-    reasonLost: '飞出了着陆区',
-    outOfFuel: '燃料耗尽',
-    lowFuel: '燃料不足',
-    controlsHint: '◀ ▶ 旋转 · 按住 🔥 推进\n也可以按住画面左 / 右半区旋转',
-    scoreSoFar: '战役累计 {n} 分（进度已保存）',
-    limits: '安全着陆：↓ < 2.5 m/s · ↔ < 1.5 m/s · 倾角 < 10°',
-    newLevelBest: '本关新纪录！',
-    statusCampaign: '第 {n} 关 · {s} 分',
-    statusPractice: '练习 · 第 {n} 关',
-    landedBanner: '着陆 ×{m}',
-    endless: '无尽',
-    pausedBody: '第 {n} 关',
-    pausedCampaign: '第 {n} 关 · 战役 {s} 分（进度已保存）',
-  },
-  en: {
-    rules:
-      'Side-view moon landing: the lander falls under gravity and you must set it down softly on a landing pad.\n◀ ▶ rotate, hold 🔥 to fire the engine (fuel is limited). Holding the left / right half of the screen also rotates, so one thumb can thrust while the other steers.\nSafe landing: vertical speed < 2.5 m/s, horizontal speed < 1.5 m/s, tilt < 10°, both legs on the same pad.\nPad multipliers: wide ×1, medium ×2, narrow ×3. Level score = 100 × multiplier + fuel left % × 2.\nHitting terrain, coming in too fast or too tilted is a crash; retry as often as you like. ↻ restarts the level, ⏸ pauses.\nCampaign: 10 levels with rising gravity, rougher terrain, fewer and narrower pads, tighter fuel and crosswind from level 6; then endless mode.\nCampaign progress is saved. Practice replays any unlocked level on fresh terrain.',
-    desc: 'Manage thrust and attitude to set the lander down gently on a pad before the fuel runs out.',
-    modeCampaign: 'Campaign',
-    modePractice: 'Practice',
-    campaignInfo: '10 levels, then endless mode',
-    bestCampaign: 'Best campaign: {n} pts',
-    bestLevel: 'Level best: {n} pts',
-    noBest: 'No record yet',
-    levelN: 'Level {n}',
-    unlockedN: '{n} levels unlocked',
-    runProgress: 'In progress: level {n} · {s} pts banked',
-    continueRun: 'Continue · Level {n}',
-    newCampaign: 'New campaign',
-    newCampaignConfirm: 'Abandon the current campaign (level {n} · {s} pts) and start again from level 1?',
-    alt: 'Alt',
-    vspeed: 'V-speed',
-    hspeed: 'H-speed',
-    tilt: 'Tilt',
-    fuel: 'Fuel',
-    rotateLeft: 'Rotate left',
-    rotateRight: 'Rotate right',
-    thrust: 'Thrust',
-    restartLevel: 'Restart level',
-    menu: 'Menu',
-    replay: 'Replay',
-    gravityLabel: 'Gravity {g} m/s²',
-    windLabel: 'Wind {dir} {w} m/s²',
-    noWind: 'No wind',
-    wind: 'Wind',
-    landedTitle: 'Touchdown!',
-    crashedTitle: 'Crashed',
-    padBonus: 'Pad ×{m}',
-    fuelBonus: 'Fuel left {f}%',
-    levelScore: 'Level score',
-    campaignTotal: 'Campaign total',
-    campaignComplete: 'Campaign complete!',
-    campaignCompleteBody: 'All 10 levels done! Endless mode is next: heavier gravity, stronger wind, tighter fuel.',
-    continueEndless: 'Endless mode',
-    reasonTerrain: 'Landed on rough ground',
-    reasonOffPad: 'One leg missed the pad',
-    reasonVspeed: 'Too fast vertically: {v} m/s (limit 2.5)',
-    reasonHspeed: 'Too fast horizontally: {v} m/s (limit 1.5)',
-    reasonTilt: 'Too tilted: {a}° (limit 10°)',
-    reasonHull: 'The hull struck the terrain',
-    reasonLost: 'Drifted out of the landing zone',
-    outOfFuel: 'Out of fuel',
-    lowFuel: 'Low fuel',
-    controlsHint: '◀ ▶ rotate · hold 🔥 to thrust\nor hold the left / right half of the screen',
-    scoreSoFar: 'Campaign so far: {n} pts (progress saved)',
-    limits: 'Safe landing: ↓ < 2.5 m/s · ↔ < 1.5 m/s · tilt < 10°',
-    newLevelBest: 'New level best!',
-    statusCampaign: 'Level {n} · {s} pts',
-    statusPractice: 'Practice · Level {n}',
-    landedBanner: 'Landed ×{m}',
-    endless: 'Endless',
-    pausedBody: 'Level {n}',
-    pausedCampaign: 'Level {n} · campaign {s} pts (progress saved)',
-  },
-};
 
 type Mode = 'campaign' | 'practice';
 
@@ -200,6 +84,17 @@ interface Particle {
   spin: number;
 }
 
+interface Box {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+function overlaps(a: Box, b: Box): boolean {
+  return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+}
+
 interface Star {
   x: number;
   y: number;
@@ -232,36 +127,77 @@ const HILL_X0 = -WORLD_W;
 const HILL_X1 = WORLD_W * 2;
 const HILL_N = 72;
 const HILL_DEPTH = 0.45;
+/** Seconds the lander takes to rock upright onto both feet after a touchdown. */
+const SETTLE_TIME = 0.32;
+/** Decorative crater rim outside the level (only visible on wide screens): sample spacing (m) and count. */
+const OUTER_STEP = 4;
+const OUTER_N = 70;
 
+/** Parse '#rgb', '#rrggbb' or 'rgb()/rgba()' into channels; null when the format is unknown. */
+function rgbOf(c: string): [number, number, number] | null {
+  const s = c.trim();
+  let m = /^#([0-9a-f]{3})$/i.exec(s);
+  if (m) return [0, 1, 2].map((i) => parseInt(m![1][i] + m![1][i], 16)) as [number, number, number];
+  m = /^#([0-9a-f]{6})/i.exec(s);
+  if (m) return [0, 2, 4].map((i) => parseInt(m![1].slice(i, i + 2), 16)) as [number, number, number];
+  m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(s);
+  if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return null;
+}
+
+/** Blend two theme colours: t = 0 gives `a`, 1 gives `b`. */
+function mix(a: string, b: string, t: number): string {
+  const x = rgbOf(a);
+  const y = rgbOf(b);
+  if (!x || !y) return a || b;
+  const c = x.map((v, i) => Math.round(v + (y[i] - v) * t));
+  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+}
+
+/**
+ * Canvas colours derived from the theme tokens (terrain from --surface-2, sky from --bg, details from --muted /
+ * --text …). Only the lander's gold foil and the Earth keep fixed "object" colours.
+ */
 function palette(theme: ThemeName, cssVar: (n: string) => string): Palette {
   const dark = theme === 'dark';
+  const v = (name: string, darkFallback: string, lightFallback: string): string => cssVar(name) || (dark ? darkFallback : lightFallback);
+  const bg = v('--bg', '#0f1218', '#f4f6fb');
+  const surface = v('--surface', '#1a1f2b', '#ffffff');
+  const surface2 = v('--surface-2', '#232a39', '#eef1f7');
+  const border = v('--border', '#2d3548', '#dde2ec');
+  const text = v('--text', '#e8ecf3', '#171a21');
+  const muted = v('--muted', '#8b94a7', '#5c6475');
+  const accent = v('--accent', '#5b8cff', '#3366ff');
+  const success = v('--success', '#3ddc97', '#1fa86b');
+  // The regolith is --surface-2, shaded a little toward --muted so it stands out from the sky and the far hills.
+  const ground = mix(surface2, muted, dark ? 0.18 : 0.3);
   return {
-    skyTop: dark ? '#04060c' : '#cfd8ea',
-    skyBottom: dark ? '#0c111c' : '#eef2f9',
-    star: dark ? '#ffffff' : '#5d6984',
-    starAlpha: dark ? 1 : 0.4,
-    hills: dark ? '#121826' : '#dce3ef',
-    ground: dark ? '#343d54' : '#b4bfd3',
-    groundDeep: dark ? '#1b2131' : '#8794ad',
-    groundEdge: dark ? '#5a6684' : '#5f6b84',
-    pad: cssVar('--success') || (dark ? '#3ddc97' : '#1fa86b'),
-    hull: dark ? '#e3e8f1' : '#f8fafc',
-    hullDark: dark ? '#8e97a9' : '#6d7789',
+    skyTop: dark ? mix(bg, '#000000', 0.7) : mix(border, accent, 0.12),
+    skyBottom: dark ? mix(bg, '#000000', 0.2) : mix(bg, accent, 0.04),
+    star: dark ? text : muted,
+    starAlpha: dark ? 1 : 0.45,
+    hills: dark ? mix(bg, surface2, 0.15) : mix(border, bg, 0.25),
+    ground,
+    groundDeep: dark ? mix(surface2, bg, 0.5) : mix(surface2, muted, 0.55),
+    groundEdge: dark ? mix(border, muted, 0.55) : mix(muted, text, 0.1),
+    pad: success,
+    hull: dark ? text : surface,
+    hullDark: dark ? mix(muted, text, 0.1) : mix(muted, surface, 0.12),
     gold: '#d9a62a',
     goldDark: '#9c741a',
-    leg: dark ? '#b4bccb' : '#5a6372',
-    nozzle: dark ? '#6b7384' : '#4a5363',
-    dust: dark ? '#9aa4b8' : '#7d8aa3',
-    smoke: dark ? '#6b7384' : '#5a6372',
+    leg: dark ? mix(muted, text, 0.45) : muted,
+    nozzle: dark ? mix(muted, bg, 0.3) : mix(muted, text, 0.25),
+    dust: dark ? muted : mix(muted, bg, 0.2),
+    smoke: dark ? mix(muted, bg, 0.3) : muted,
     sea: dark ? '#3a74d8' : '#4f86e0',
     land: dark ? '#3fbf86' : '#3aa877',
     earthAlpha: dark ? 0.95 : 0.7,
-    text: cssVar('--text') || (dark ? '#e8ecf3' : '#171a21'),
-    muted: cssVar('--muted') || '#8b94a7',
-    accent: cssVar('--accent') || '#5b8cff',
-    danger: cssVar('--danger') || '#ff5470',
-    warning: cssVar('--warning') || '#ffc857',
-    success: cssVar('--success') || '#3ddc97',
+    text,
+    muted,
+    accent,
+    danger: v('--danger', '#ff5470', '#e0304f'),
+    warning: v('--warning', '#ffc857', '#d9960a'),
+    success,
   };
 }
 
@@ -283,6 +219,8 @@ function create(ctx: GameContext): GameInstance {
   /** Campaign score banked by completed levels. */
   let runScore = 0;
   let paused = false;
+  /** A dialog the game did not open (e.g. the header's rules "?") is covering a live flight. */
+  let heldByModal = false;
   let acc = 0;
   let endTimer = 0;
   let clock = 0;
@@ -296,12 +234,20 @@ function create(ctx: GameContext): GameInstance {
   let lowFuelWarned = false;
   let emptyWarned = false;
   let landedAt = 0;
+  /** Lander pose just before touchdown, so the settle onto the pad can be animated instead of snapped. */
+  const preStep = { x: 0, y: 0, angle: 0 };
+  let touchdown: { x: number; y: number; angle: number } | null = null;
   let showHint = false;
+  /** Where the first-run hint box is drawn (eased, so it glides out of the lander's way). */
+  let hintPos: { x: number; y: number } | null = null;
   let dustAcc = 0;
   let result: LandingResult | null = null;
   const particles: Particle[] = [];
   let stars: Star[] = [];
   let hills: number[] = [];
+  /** Decorative outer slopes of the crater beyond the left / right level edge (heights every OUTER_STEP m). */
+  let outerL: number[] = [];
+  let outerR: number[] = [];
 
   // inputs
   let btnLeft = false;
@@ -338,6 +284,7 @@ function create(ctx: GameContext): GameInstance {
   // ── Global listeners ──────────────────────────────────────────────────
   const onKey = (e: KeyboardEvent): void => {
     const down = e.type === 'keydown';
+    if (down && modalOpen()) return; // a dialog has the keyboard; key releases still go through
     switch (e.key) {
       case 'ArrowLeft':
       case 'a':
@@ -452,8 +399,8 @@ function create(ctx: GameContext): GameInstance {
           },
           { variant: 'secondary', class: 'll-step-btn' },
         );
-        prev.setAttribute('aria-label', '−');
-        next.setAttribute('aria-label', '+');
+        prev.setAttribute('aria-label', t('prevLevel'));
+        next.setAttribute('aria-label', t('nextLevel'));
         const refresh = (): void => {
           label.textContent = t('levelN', { n: practiceLevel });
           const b = ctx.storage.getBest('level-' + practiceLevel);
@@ -551,6 +498,7 @@ function create(ctx: GameContext): GameInstance {
     endTimer = 0;
     particles.length = 0;
     paused = false;
+    heldByModal = false;
     result = null;
     releaseInputs();
     hudAlt = hudV = hudH = hudTilt = fuelFill = fuelPct = null;
@@ -577,6 +525,8 @@ function create(ctx: GameContext): GameInstance {
     lowFuelWarned = false;
     emptyWarned = false;
     landedAt = 0;
+    touchdown = null;
+    hintPos = null;
     dustAcc = 0;
     const srand = rng(seed ^ 0x9e3779b9);
     stars = Array.from({ length: 120 }, () => ({
@@ -594,6 +544,16 @@ function create(ctx: GameContext): GameInstance {
       const x = HILL_X0 + ((HILL_X1 - HILL_X0) * i) / HILL_N;
       return 44 + 13 * Math.sin(x / 31 + p1) + 7 * Math.sin(x / 13 + p2) + 3 * Math.sin(x / 6 + p3);
     });
+    // Beyond the walls the crater rim falls away into rolling ground (only seen when the view is wider than the level).
+    const outerSlope = (crest: number, ph: number): number[] =>
+      Array.from({ length: OUTER_N + 1 }, (_, i) => {
+        const d = i * OUTER_STEP;
+        const base = 34 + 9 * Math.sin(d / 27 + ph) + 4 * Math.sin(d / 9.5 + ph * 2.3);
+        return crest + (base - crest) * smoothstep(d / 56);
+      });
+    const tp = lv.terrain.points;
+    outerL = outerSlope(tp[0].y, srand() * TAU);
+    outerR = outerSlope(tp[tp.length - 1].y, srand() * TAU);
 
     // HUD
     hudAlt = el('div', { class: 'stat-value', text: '–' });
@@ -694,6 +654,11 @@ function create(ctx: GameContext): GameInstance {
   }
 
   // ── Pause ─────────────────────────────────────────────────────────────
+  /** True while any dialog is up (ours or the shell's, e.g. the rules sheet). */
+  function modalOpen(): boolean {
+    return document.querySelector('.modal-backdrop:not(.closing)') !== null;
+  }
+
   function pauseGame(): void {
     if (!lv || paused || (lv.phase !== 'flying' && lv.phase !== 'ready')) return;
     paused = true;
@@ -726,7 +691,20 @@ function create(ctx: GameContext): GameInstance {
   function frame(dt: number): void {
     if (!lv || !cv) return;
     clock += dt;
-    if (!paused && (lv.phase === 'ready' || lv.phase === 'flying')) {
+    const live = lv.phase === 'ready' || lv.phase === 'flying';
+    // Someone else's dialog (the rules "?") over a live flight freezes the simulation; when it closes, the
+    // flight stays paused until the player resumes, so nobody crashes while reading.
+    if (live && !paused && modalOpen()) {
+      if (!heldByModal) {
+        heldByModal = true;
+        releaseInputs();
+      }
+    } else if (heldByModal) {
+      heldByModal = false;
+      acc = 0;
+      if (live) pauseGame();
+    }
+    if (!paused && !heldByModal && live) {
       const input = currentInput();
       if (lv.phase === 'flying') {
         if (input.thrust && !wasThrust && lv.lander.fuel > 0 && clock - lastThrustSound > 0.25) {
@@ -738,6 +716,9 @@ function create(ctx: GameContext): GameInstance {
       acc += dt;
       let steps = 0;
       while (acc >= DT && steps < 6) {
+        preStep.x = lv.lander.x;
+        preStep.y = lv.lander.y;
+        preStep.angle = lv.lander.angle;
         const r = stepLevel(lv, input);
         acc -= DT;
         steps++;
@@ -779,6 +760,7 @@ function create(ctx: GameContext): GameInstance {
     landedAt = clock;
     const l = lv.lander;
     if (r === 'landed') {
+      touchdown = { ...preStep };
       ctx.play('win');
       ctx.haptic('success');
       spawnDust(l.x, l.y + FOOT_Y);
@@ -861,7 +843,8 @@ function create(ctx: GameContext): GameInstance {
               { label: r.finishedCampaign ? t('continueEndless') : t('nextLevel'), primary: true, onClick: goNext },
             ]
           : [
-              { label: t('home'), onClick: () => ctx.exit() },
+              // practice: back to the level picker (the header ‹ still leads home)
+              { label: t('menu'), onClick: () => showStart() },
               { label: t('replay'), onClick: () => startLevel(r.level, seed) },
               { label: t('nextLevel'), primary: true, onClick: goNext },
             ],
@@ -882,10 +865,17 @@ function create(ctx: GameContext): GameInstance {
         return t('reasonOffPad');
       case 'terrain':
         return t('reasonTerrain');
+      case 'cliff':
+        return t('reasonCliff');
       case 'hull':
         return t('reasonHull');
       case 'lost':
         return t('reasonLost');
+      default: {
+        // Compile-time guard: a new CrashReason without a message here is a type error.
+        const unknown: never = r;
+        return t('reasonTerrain') + ` (${String(unknown)})`;
+      }
     }
   }
 
@@ -913,7 +903,7 @@ function create(ctx: GameContext): GameInstance {
       body,
       dismissible: false,
       buttons: [
-        { label: t('home'), onClick: () => ctx.exit() },
+        mode === 'campaign' ? { label: t('home'), onClick: () => ctx.exit() } : { label: t('menu'), onClick: () => showStart() },
         { label: t('retry'), primary: true, onClick: () => startLevel(level, seed) },
       ],
     });
@@ -1012,7 +1002,6 @@ function create(ctx: GameContext): GameInstance {
   function updateParticles(dt: number): void {
     if (!lv || particles.length === 0) return;
     const g = lv.cfg.gravity;
-    const terrain = lv.terrain;
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.life -= dt;
@@ -1028,7 +1017,7 @@ function create(ctx: GameContext): GameInstance {
       p.y += p.vy * dt;
       p.angle += p.spin * dt;
       if (p.kind !== 'smoke') {
-        const ground = heightAt(terrain, clamp(p.x, 0, terrain.width));
+        const ground = surfaceAt(p.x);
         if (p.y < ground) {
           p.y = ground;
           p.vy = Math.abs(p.vy) * 0.3;
@@ -1037,6 +1026,18 @@ function create(ctx: GameContext): GameInstance {
         }
       }
     }
+  }
+
+  /** Ground height for drawing and debris: the level terrain, continued by the decorative crater rim outside it. */
+  function surfaceAt(x: number): number {
+    if (!lv) return 0;
+    const w = lv.terrain.width;
+    if (x >= 0 && x <= w) return heightAt(lv.terrain, x);
+    const arr = x < 0 ? outerL : outerR;
+    if (!arr.length) return heightAt(lv.terrain, clamp(x, 0, w));
+    const d = Math.min((x < 0 ? -x : x - w) / OUTER_STEP, OUTER_N);
+    const i = Math.min(Math.floor(d), OUTER_N - 1);
+    return arr[i] + (arr[i + 1] - arr[i]) * (d - i);
   }
 
   // ── Camera ────────────────────────────────────────────────────────────
@@ -1116,21 +1117,26 @@ function create(ctx: GameContext): GameInstance {
     g.closePath();
     g.fill();
 
-    // Terrain (extended flat beyond the level edges so wide views never show a void)
+    // Terrain: the level, continued by the crater's outer slopes so wide views never show a void or a flat slab
     const pts = lv.terrain.points;
-    const first = pts[0];
     const last = pts[pts.length - 1];
+    const span = OUTER_N * OUTER_STEP;
+    const xl = Math.min(sx(-span), 0) - 20;
+    const xr = Math.max(sx(last.x + span), W) + 20;
     const terrainPath = (): void => {
-      g.moveTo(Math.min(sx(first.x), 0) - 20, sy(first.y));
+      g.moveTo(xl, sy(outerL[OUTER_N]));
+      for (let i = OUTER_N; i >= 1; i--) g.lineTo(sx(-i * OUTER_STEP), sy(outerL[i]));
       for (let i = 0; i < pts.length; i++) g.lineTo(sx(pts[i].x), sy(pts[i].y));
-      g.lineTo(Math.max(sx(last.x), W) + 20, sy(last.y));
+      for (let i = 1; i <= OUTER_N; i++) g.lineTo(sx(last.x + i * OUTER_STEP), sy(outerR[i]));
+      g.lineTo(xr, sy(outerR[OUTER_N]));
     };
     g.beginPath();
     terrainPath();
-    g.lineTo(Math.max(sx(last.x), W) + 20, H + 40);
-    g.lineTo(Math.min(sx(first.x), 0) - 20, H + 40);
+    g.lineTo(xr, H + 40);
+    g.lineTo(xl, H + 40);
     g.closePath();
-    const groundGrad = g.createLinearGradient(0, sy(70), 0, sy(-5));
+    // --surface-2 at the surface, fading toward the deep shade below it
+    const groundGrad = g.createLinearGradient(0, sy(55), 0, sy(-6));
     groundGrad.addColorStop(0, pal.ground);
     groundGrad.addColorStop(1, pal.groundDeep);
     g.fillStyle = groundGrad;
@@ -1148,6 +1154,8 @@ function create(ctx: GameContext): GameInstance {
     const lz = Math.max(zoom, 3.4);
     const lsx = sx(l.x);
     const lsy = sy(l.y);
+    /** Screen boxes of the on-screen pad labels, so the off-screen indicators can steer clear of them. */
+    const taken: Box[] = [];
     for (const p of lv.terrain.pads) {
       const x0 = sx(p.x0);
       const x1 = sx(p.x1);
@@ -1190,21 +1198,37 @@ function create(ctx: GameContext): GameInstance {
       const ly = y - padW / 2 - 3;
       const d = Math.hypot(lx - lsx, ly - fontPx / 2 - lsy);
       g.globalAlpha = clamp((d - lz * 3) / (lz * 4), 0.15, 1);
-      g.fillText('×' + p.mult, lx, ly);
+      const label = '×' + p.mult;
+      g.fillText(label, lx, ly);
       g.globalAlpha = 1;
+      const tw = g.measureText(label).width;
+      taken.push({ x0: lx - tw / 2 - 3, x1: lx + tw / 2 + 3, y0: ly - fontPx - 2, y1: ly + 2 });
     }
 
-    // Off-screen pad indicators
+    // Off-screen pad indicators, nudged up / down so they never sit on an on-screen label or on each other
     for (const p of lv.terrain.pads) {
       if (sx(p.x1) >= 0 && sx(p.x0) <= W) continue;
-      drawPadIndicator(g, p, sx(p.x1) < 0, clamp(sy(p.y), 40, H - 40), W);
+      const leftSide = sx(p.x1) < 0;
+      const want = clamp(sy(p.y), 40, H - 40);
+      const boxAt = (y: number): Box => (leftSide ? { x0: 4, x1: 52, y0: y - 10, y1: y + 10 } : { x0: W - 52, x1: W - 4, y0: y - 10, y1: y + 10 });
+      let y = want;
+      for (const dy of [0, -24, 24, -48, 48, -72, 72, -96, 96]) {
+        const cand = clamp(want + dy, 24, H - 24);
+        if (!taken.some((b) => overlaps(b, boxAt(cand)))) {
+          y = cand;
+          break;
+        }
+      }
+      taken.push(boxAt(y));
+      drawPadIndicator(g, p, leftSide, y, W);
     }
 
     // Lander
     if (lv.phase !== 'crashed') {
       const input = currentInput();
-      const flying = lv.phase === 'flying' && !paused;
-      drawLander(g, sx(l.x), sy(l.y), l.angle, lz, l.thrusting && flying, flying ? input.rot : 0);
+      const flying = lv.phase === 'flying' && !paused && !heldByModal;
+      const pose = landerPose();
+      drawLander(g, sx(pose.x), sy(pose.y), pose.angle, lz, l.thrusting && flying, flying ? input.rot : 0);
     }
 
     // Particles
@@ -1284,14 +1308,29 @@ function create(ctx: GameContext): GameInstance {
       const lh = 18;
       const boxH = lines.length * lh + 14;
       const boxW = Math.min(W - 24, Math.max(...lines.map((ln) => g.measureText(ln).width)) + 28);
-      const by = 10;
+      // Top centre unless that covers the lander (short landscape views): then beside it, else below it.
+      const pose = landerPose();
+      const ext = lz * (FOOT_X + FOOT_PAD) + 10;
+      const ship: Box = { x0: sx(pose.x) - ext, x1: sx(pose.x) + ext, y0: sy(pose.y) - lz * 3.2 - 10, y1: sy(pose.y) - lz * FOOT_Y + 10 };
+      let bx = (W - boxW) / 2;
+      let by = 10;
+      if (overlaps(ship, { x0: bx, x1: bx + boxW, y0: by, y1: by + boxH })) {
+        if (ship.x1 + 8 + boxW <= W - 8 && (ship.x0 < W / 2 || ship.x0 - 8 - boxW < 8)) bx = ship.x1 + 8;
+        else if (ship.x0 - 8 - boxW >= 8) bx = ship.x0 - 8 - boxW;
+        else by = Math.min(ship.y1 + 8, H - boxH - 8);
+      }
+      if (!hintPos || camSnap) hintPos = { x: bx, y: by };
+      hintPos.x += (bx - hintPos.x) * 0.18;
+      hintPos.y += (by - hintPos.y) * 0.18;
+      bx = hintPos.x;
+      by = hintPos.y;
       g.fillStyle = pal.skyTop;
       g.globalAlpha = fade * 0.8;
-      roundRect(g, (W - boxW) / 2, by, boxW, boxH, 12);
+      roundRect(g, bx, by, boxW, boxH, 12);
       g.fill();
       g.globalAlpha = fade;
       g.fillStyle = pal.text;
-      lines.forEach((ln, i) => g.fillText(ln, W / 2, by + 7 + lh * i + lh / 2));
+      lines.forEach((ln, i) => g.fillText(ln, bx + boxW / 2, by + 7 + lh * i + lh / 2));
       g.globalAlpha = 1;
     }
 
@@ -1311,6 +1350,28 @@ function create(ctx: GameContext): GameInstance {
       g.fillText(`${t('gravityLabel', { g: lv.cfg.gravity.toFixed(1) })} · ${windTxt}`, W / 2, by + 28);
       g.globalAlpha = 1;
     }
+  }
+
+  /**
+   * Where to draw the lander. Right after a touchdown it rocks upright about the foot that touched down while that
+   * foot slides to its settled spot (logic.settle), instead of snapping straight to the final pose.
+   */
+  function landerPose(): { x: number; y: number; angle: number } {
+    const l = lv!.lander;
+    if (lv!.phase !== 'landed' || !touchdown) return l;
+    const k = smoothstep((clock - landedAt) / SETTLE_TIME);
+    if (k >= 1) return l;
+    const from = { ...l, x: touchdown.x, y: touchdown.y, angle: touchdown.angle };
+    const feet = FEET.map((p) => toWorld(from, p));
+    const i = feet[0].y <= feet[1].y ? 0 : 1;
+    const end = toWorld(l, FEET[i]);
+    const fx = feet[i].x + (end.x - feet[i].x) * k;
+    const fy = feet[i].y + (end.y - feet[i].y) * k;
+    const angle = touchdown.angle * (1 - k);
+    const c = Math.cos(angle);
+    const sn = Math.sin(angle);
+    const [px, py] = FEET[i];
+    return { x: fx - (px * c + py * sn), y: fy - (-px * sn + py * c), angle };
   }
 
   function drawEarth(g: CanvasRenderingContext2D, x: number, y: number, r: number): void {
@@ -1442,14 +1503,14 @@ function create(ctx: GameContext): GameInstance {
     for (const s of [-1, 1]) {
       g.beginPath();
       g.moveTo(s * 2.0, -0.6);
-      g.lineTo(s * 3.0, -2.6);
+      g.lineTo(s * FOOT_X, FOOT_Y);
       g.moveTo(s * 2.0, -1.4);
       g.lineTo(s * 2.75, -2.1);
       g.stroke();
       g.lineWidth = lw(2.6);
       g.beginPath();
-      g.moveTo(s * 2.45, -2.6);
-      g.lineTo(s * 3.55, -2.6);
+      g.moveTo(s * (FOOT_X - FOOT_PAD), FOOT_Y);
+      g.lineTo(s * (FOOT_X + FOOT_PAD), FOOT_Y);
       g.stroke();
       g.lineWidth = lw(2.2);
     }

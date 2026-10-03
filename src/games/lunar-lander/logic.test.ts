@@ -3,16 +3,18 @@ import {
   CAMPAIGN_LEVELS,
   CLIFF_SLOPE,
   DT,
+  CRASH_REASONS,
   EXHAUST_REACH,
   VIEW_H_MIN,
   FEET,
+  FOOT_PAD,
+  FOOT_X,
   FOOT_Y,
   HULL,
   MAX_TILT,
   MAX_VX,
   MAX_VY,
   PAD_GAP,
-  PAD_LEVEL_TOL,
   PAD_MARGIN,
   PAD_TOLERANCE,
   PAD_WIDTHS,
@@ -38,6 +40,7 @@ import {
   normalizeAngle,
   optimalBurnTime,
   overviewZoom,
+  padEdgeMargin,
   padsFor,
   rng,
   sanitizeRun,
@@ -120,6 +123,18 @@ describe('levelConfig', () => {
     }
     expect(levelConfig(0).level).toBe(1);
     expect(levelConfig(2.7).level).toBe(2);
+  });
+
+  it('never brings back more or wider pads on a later level (campaign and endless)', () => {
+    const total = (n: number) => padsFor(n).reduce((s, m) => s + PAD_WIDTHS[m], 0);
+    const widest = (n: number) => Math.max(...padsFor(n).map((m) => PAD_WIDTHS[m]));
+    for (let n = 2; n <= 40; n++) {
+      expect(padsFor(n).length, `level ${n} pad count`).toBeLessThanOrEqual(padsFor(n - 1).length);
+      expect(total(n), `level ${n} total pad width`).toBeLessThanOrEqual(total(n - 1));
+      expect(widest(n), `level ${n} widest pad`).toBeLessThanOrEqual(widest(n - 1));
+    }
+    expect(total(CAMPAIGN_LEVELS)).toBeLessThan(total(1));
+    expect(padsFor(5)).not.toContain(1); // the wide ×1 pad is gone for good after level 4
   });
 });
 
@@ -425,7 +440,7 @@ describe('pad edges (rims and drop-offs)', () => {
         for (const p of terrain.pads) {
           for (const side of [-1, 1]) {
             for (const off of [-0.29, -0.15, 0, 0.15, 0.29]) {
-              for (const ang of [0, 0.12]) {
+              for (const ang of [0, 0.12, -0.12]) {
                 const xf = side < 0 ? p.x0 + off : p.x1 + off; // the outer foot
                 const l = createLander(xf - side * 3, Math.max(p.y, heightAt(terrain, xf)) + 4, 0);
                 l.vy = -1.5;
@@ -433,18 +448,69 @@ describe('pad edges (rims and drop-offs)', () => {
                 const { result, lv, yBefore } = descend(terrain, l);
                 if (result !== 'landed') continue;
                 landings++;
-                const grounds = FEET.map((q) => heightAt(terrain, toWorld(lv.lander, q).x));
-                if (grounds.some((g) => g > p.y + PAD_LEVEL_TOL) || yBefore - lv.lander.y > 0.8) {
-                  problems.push(`level ${n} seed ${seed} side ${side} off ${off} ang ${ang}: drop ${(yBefore - lv.lander.y).toFixed(2)}`);
+                const xBefore = lv.lander.x;
+                const tag = `level ${n} seed ${seed} side ${side} off ${off} ang ${ang}`;
+                for (const q of FEET) {
+                  const f = toWorld(lv.lander, q);
+                  // the foot itself stands on the pad surface…
+                  if (f.x < p.x0 - 1e-9 || f.x > p.x1 + 1e-9) problems.push(`${tag}: foot at ${f.x.toFixed(2)} outside the pad`);
+                  // …and no part of its foot pad sinks into a rim beside the pad
+                  for (let k = 0; k <= 10; k++) {
+                    const x = f.x - FOOT_PAD + (2 * FOOT_PAD * k) / 10;
+                    if (heightAt(terrain, x) > p.y + 1e-6) {
+                      problems.push(`${tag}: foot pad buried ${(heightAt(terrain, x) - p.y).toFixed(2)} m at x ${x.toFixed(2)}`);
+                      break;
+                    }
+                  }
                 }
+                if (yBefore - lv.lander.y > 0.8) problems.push(`${tag}: drop ${(yBefore - lv.lander.y).toFixed(2)}`);
+                expect(Math.abs(xBefore - lv.lander.x)).toBeLessThan(1.5);
               }
             }
           }
         }
       }
     }
-    expect(landings).toBeGreaterThan(200);
+    expect(landings).toBeGreaterThan(300);
     expect(problems).toEqual([]);
+  });
+
+  it('settles a tilted edge touchdown inward next to a raised rim (reviewer case: foot 0.15 m past the edge, tilt -0.12)', () => {
+    // Rim side (left): the ground climbs 7 m right outside x0, so the left foot pad must end up fully on the pad.
+    const tiltedRim: Terrain = {
+      width: WORLD_W,
+      points: [
+        { x: 0, y: 27 },
+        { x: 59.2, y: 27 },
+        { x: 59.6, y: 20 },
+        { x: 60, y: 20 },
+        { x: 74, y: 20 },
+        { x: 74.01, y: 17 },
+        { x: WORLD_W, y: 17 },
+      ],
+      pads: [{ x0: 60, x1: 74, y: 20, mult: 2 }],
+    };
+    const p = tiltedRim.pads[0];
+    expect(padEdgeMargin(tiltedRim, p, -1)).toBe(FOOT_PAD); // rim
+    expect(padEdgeMargin(tiltedRim, p, 1)).toBe(0); // drop-off
+    const l = createLander(0, 0, 0);
+    l.angle = -0.12; // left foot low
+    const foot = toWorld(l, FEET[0]);
+    l.x = p.x0 - 0.15 - foot.x;
+    l.y = p.y + 0.05 - foot.y;
+    l.vy = -1.5;
+    const lv = createLevel(1, 1);
+    lv.terrain = tiltedRim;
+    lv.phase = 'flying';
+    lv.lander = l;
+    let result: ReturnType<typeof stepLevel> = null;
+    for (let i = 0; i < 30 && !result; i++) result = stepLevel(lv, NO_INPUT);
+    expect(result).toBe('landed');
+    const [lf, rf] = FEET.map((q) => toWorld(lv.lander, q));
+    expect(lf.x - FOOT_PAD).toBeGreaterThanOrEqual(p.x0 - 1e-9);
+    expect(rf.x).toBeLessThanOrEqual(p.x1);
+    expect(lf.y).toBeCloseTo(p.y, 9);
+    expect(lv.lander.angle).toBe(0);
   });
 });
 
@@ -477,6 +543,22 @@ describe('crash reasons away from the pads', () => {
     const c = checkContact(l, walled);
     expect(c.kind).toBe('crashed');
     expect(c.kind === 'crashed' && c.reasons).toEqual(['cliff', 'hspeed']);
+  });
+
+  it('only ever reports reasons from CRASH_REASONS (the UI has a message for each)', () => {
+    const seen = new Set<string>();
+    for (let n = 1; n <= 10; n++) {
+      for (let seed = 1; seed <= 40; seed++) {
+        const lv = createLevel(n, seed * 101 + n);
+        let result: ReturnType<typeof stepLevel> = null;
+        const input: Input = { thrust: false, rot: seed % 3 === 0 ? 0.3 : 0 };
+        for (let i = 0; i < 60 * 60 && !result; i++) result = stepLevel(lv, input);
+        if (lv.outcome?.kind === 'crashed') lv.outcome.reasons.forEach((r) => seen.add(r));
+      }
+    }
+    for (const r of seen) expect(CRASH_REASONS as readonly string[]).toContain(r);
+    expect(seen.has('vspeed')).toBe(true);
+    expect(new Set(CRASH_REASONS).size).toBe(CRASH_REASONS.length);
   });
 
   it('touching down on gentle ground away from the pads is still "terrain"', () => {
@@ -537,11 +619,39 @@ describe('collision', () => {
     const l = createLander(70, 30, 1);
     l.angle = 0.1;
     l.vy = -2;
-    settle(l, terrain.pads[0]);
+    settle(l, terrain.pads[0], terrain);
     expect(l.angle).toBe(0);
     expect(l.vx).toBe(0);
     expect(l.vy).toBe(0);
     expect(toWorld(l, FEET[0]).y).toBeCloseTo(20, 9);
+    expect(toWorld(l, FEET[1]).y).toBeCloseTo(20, 9);
+  });
+
+  it('settle pivots about the foot that touched down instead of sliding it', () => {
+    const pad = terrain.pads[0]; // 60–82
+    for (const angle of [0.15, -0.15, 0.05]) {
+      const l = createLander(71, 30, 0);
+      l.angle = angle;
+      const before = FEET.map((q) => toWorld(l, q));
+      const low = before[0].y <= before[1].y ? 0 : 1;
+      settle(l, pad, terrain);
+      const after = FEET.map((q) => toWorld(l, q));
+      expect(after[low].x).toBeCloseTo(before[low].x, 9);
+      expect(after[1 - low].x - after[low].x).toBeCloseTo(low === 0 ? 2 * FOOT_X : -2 * FOOT_X, 9);
+    }
+  });
+
+  it('settle keeps both feet on the pad: inward at a pad edge, flush with a drop-off edge', () => {
+    const pad = terrain.pads[0]; // flat all around: no rims, so only the foot points must stay on the pad
+    const l = createLander(pad.x0 + FOOT_X - 0.25, 30, 0);
+    l.angle = 0.1; // right foot low and well inside; pivoting would push the left foot further out
+    settle(l, pad, terrain);
+    expect(toWorld(l, FEET[0]).x).toBeCloseTo(pad.x0, 9);
+    const r = createLander(pad.x1 - FOOT_X + 0.25, 30, 0);
+    settle(r, pad); // without terrain: same rule
+    expect(toWorld(r, FEET[1]).x).toBeCloseTo(pad.x1, 9);
+    expect(padEdgeMargin(terrain, pad, -1)).toBe(0);
+    expect(padEdgeMargin(terrain, pad, 1)).toBe(0);
   });
 
   it('altitudeAbove measures the feet height over the ground below', () => {

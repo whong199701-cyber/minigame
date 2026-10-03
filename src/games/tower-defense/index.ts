@@ -257,7 +257,7 @@ function create(ctx: GameContext): GameInstance {
   const onKey = (e: KeyboardEvent): void => {
     if (screen !== 'game' || !sim) return;
     if (e.key === ' ' || e.key === 'Enter') {
-      if (modalOpen) return;
+      if (modalOpen || foreignModalOpen()) return;
       if (paused) resumeGame(true);
       else if (waveBtn && !waveBtn.disabled) waveBtn.click();
       e.preventDefault();
@@ -536,8 +536,9 @@ function create(ctx: GameContext): GameInstance {
 
   function frame(dt: number): void {
     if (!sim || !cv) return;
-    // Reading the rules mid-wave must not cost lives: pause under any modal the game did not open.
-    if (!paused && !finished && foreignModalOpen()) pauseGame();
+    // Reading the rules mid-wave must not cost lives: pause under any modal the game did not open (only while
+    // the simulation is actually running, so opening the rules before wave 1 does not leave a pause overlay).
+    if (!paused && !finished && (sim.phase === 'wave' || sim.phase === 'countdown') && foreignModalOpen()) pauseGame();
     const scale = paused || finished ? 0 : speed;
     if (scale > 0) {
       acc = Math.min(acc + dt * scale, MAX_SIM_PER_FRAME);

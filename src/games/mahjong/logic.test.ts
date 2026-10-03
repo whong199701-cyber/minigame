@@ -426,6 +426,21 @@ describe('reshuffle', () => {
     }
   });
 
+  it('an exact search that runs out of budget never declares a clearable position hopeless', () => {
+    const left: Tile[] = [tile(10, 0, 0, 0, 3), tile(11, 0, 0, 1, 3), tile(12, 4, 0, 0, 9), tile(13, 4, 0, 1, 9)];
+    // budget 1 cannot finish the search on this solvable leftover ...
+    expect(findClearOrder(left, 1)).toBeUndefined();
+    for (let seed = 1; seed <= 10; seed++) {
+      // ... so the re-deal falls back to the random reverse fill instead of returning null
+      const res = reshuffle(left, rng(seed), { exactBudget: 1 });
+      expect(res).not.toBeNull();
+      expect(replaySolver(res!.tiles, res!.solution)).toBe(true);
+      expect(res!.tiles.map((t) => t.id)).toEqual([10, 11, 12, 13]);
+    }
+    // a provably impossible leftover is still rejected, whatever the budget
+    expect(reshuffle([tile(0, 0, 0, 0, 5), tile(1, 0, 0, 1, 5)], rng(1), { exactBudget: 1 })).toBeNull();
+  });
+
   it('a dead end left by random play on a generated board is re-dealt or proven hopeless', () => {
     for (let seed = 1; seed <= 25; seed++) {
       const r = rng(seed * 31);

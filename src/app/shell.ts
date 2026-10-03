@@ -6,6 +6,7 @@ import { isSoundEnabled, playSound, setSoundEnabled, unlockAudio } from './audio
 import { isHapticsEnabled, isHapticsSupported, setHapticsEnabled, vibrate } from './haptics';
 import { createGameStorage, clearAllData, getPlays, incrementPlays } from './storage';
 import { el, button, segmented, toggle, showModal, toast, closeAllModals } from './ui';
+import { setIcon } from './icons';
 
 const APP_VERSION = '1.0.0';
 
@@ -179,11 +180,13 @@ async function renderGame(id: string): Promise<void> {
 
   const status = el('div', { class: 'game-status muted' });
   const actions = el('div', { class: 'header-actions' });
-  const rulesBtn = el('button', { class: 'icon-btn', 'aria-label': t('rules'), text: '?' });
+  const rulesBtn = el('button', { class: 'icon-btn rules-btn', 'aria-label': t('rules'), text: '?' });
+  const backBtn = el('button', { class: 'icon-btn back', 'aria-label': t('back'), onClick: () => (location.hash = '#/') });
+  setIcon(backBtn, 'back');
   const header = el(
     'header',
     { class: 'app-header game-header' },
-    el('button', { class: 'icon-btn back', 'aria-label': t('back'), text: '‹', onClick: () => (location.hash = '#/') }),
+    backBtn,
     el('div', { class: 'game-title' }, el('h1', { text: meta.name[lang] }), status),
     actions,
     rulesBtn,
@@ -230,7 +233,8 @@ async function renderGame(id: string): Promise<void> {
       status.textContent = text;
     },
     addHeaderAction: (action: HeaderAction) => {
-      const b = el('button', { class: 'icon-btn', 'aria-label': action.label, title: action.label, text: action.icon });
+      const b = el('button', { class: 'icon-btn', 'aria-label': action.label, title: action.label });
+      setIcon(b, action.icon);
       b.addEventListener('click', () => {
         playSound('tap');
         vibrate('light');
@@ -245,12 +249,18 @@ async function renderGame(id: string): Promise<void> {
     },
   };
 
-  const showRules = () => {
-    showModal({ title: `${meta.name[lang]} · ${t('howToPlay')}`, body: gameT('rules'), buttons: [{ label: t('ok'), primary: true }] });
+  const showRules = (onClose?: () => void) => {
+    showModal({ title: `${meta.name[lang]} · ${t('howToPlay')}`, body: gameT('rules'), buttons: [{ label: t('ok'), primary: true }], onClose });
   };
   rulesBtn.addEventListener('click', () => {
     playSound('tap');
-    showRules();
+    // Real-time games pause when they are told they are hidden. Signal that before the rules sheet opens so a
+    // game's own pause UI ends up underneath the rules, and signal visible again once the sheet closes.
+    const active = current;
+    if (active) visibilityListeners.forEach((fn) => fn(false));
+    showRules(() => {
+      if (active && current === active && document.visibilityState === 'visible') visibilityListeners.forEach((fn) => fn(true));
+    });
   });
 
   let instance: GameInstance;

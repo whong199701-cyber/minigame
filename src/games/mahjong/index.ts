@@ -205,6 +205,8 @@ interface Palette {
   shadow: string;
   accent: string;
   warning: string;
+  /** Shade per layer below the top (index = layers down), drawn when "dim blocked tiles" is off. */
+  depth: string[];
 }
 
 /**
@@ -246,6 +248,7 @@ function makePalette(theme: ThemeName, cssVar: (n: string) => string): Palette {
     shadow: dark ? 'rgba(0, 0, 0, 0.55)' : rgba(text, 0.4),
     accent: hex(accent),
     warning: hex(warning),
+    depth: [0, 1, 2, 3, 4, 5, 6].map((k) => rgba(dark ? bg : muted, Math.min(0.3, k * (dark ? 0.07 : 0.045)))),
   };
 }
 
@@ -1353,8 +1356,10 @@ function create(ctx: GameContext): GameInstance {
       roundRect(g, r.x + dx + m.lift, r.y + m.lift, r.w, r.h, rad);
       g.fill();
       g.drawImage(face(tile.kind), r.x + dx, r.y, r.w, r.h);
-      if (dimBlocked && !freeIds.has(tile.id)) {
-        g.fillStyle = pal.dim;
+      // Dim on: blocked tiles are dimmed. Dim off: lower layers are shaded a little so raised tiles stand out.
+      const overlay = dimBlocked ? (freeIds.has(tile.id) ? null : pal.dim) : tile.z < m.maxZ ? pal.depth[Math.min(m.maxZ - tile.z, pal.depth.length - 1)] : null;
+      if (overlay) {
+        g.fillStyle = overlay;
         roundRect(g, r.x + dx, r.y, r.w, r.h, rad);
         g.fill();
       }

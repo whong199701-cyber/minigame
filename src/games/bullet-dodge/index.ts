@@ -360,8 +360,11 @@ function create(ctx: GameContext): GameInstance {
     return pointers.size >= 2 || keys.has('shift');
   }
 
+  let runResult: { time: number; prev: number | null; isBest: boolean } | null = null;
+
   function newRun(): void {
     if (!cv) return;
+    runResult = null;
     gameOverModal?.close();
     gameOverModal = null;
     const { W, H } = arenaSize(cv.width, cv.height);
@@ -661,6 +664,12 @@ function create(ctx: GameContext): GameInstance {
         shake = 0.45;
         state = 'dying';
         dyingT = 0;
+        // Record the run immediately so restarting/leaving during the death animation never loses a best.
+        if (world) {
+          const time = roundTime(world.time);
+          const prev = ctx.storage.getBest(mode);
+          runResult = { time, prev, isBest: ctx.storage.recordBest(mode, time, 'higher') };
+        }
         pointers.clear();
         driver = null;
         break;
@@ -1276,9 +1285,10 @@ function create(ctx: GameContext): GameInstance {
   function gameOver(): void {
     if (!world || state !== 'dying') return;
     state = 'over';
-    const time = roundTime(world.time);
-    const prev = ctx.storage.getBest(mode);
-    const isBest = ctx.storage.recordBest(mode, time, 'higher');
+    const time = runResult?.time ?? roundTime(world.time);
+    const prev = runResult ? runResult.prev : ctx.storage.getBest(mode);
+    const isBest = runResult ? runResult.isBest : ctx.storage.recordBest(mode, time, 'higher');
+    runResult = null;
     const best = ctx.storage.getBest(mode) ?? time;
     ctx.play(isBest ? 'win' : 'lose');
     ctx.haptic(isBest ? 'success' : 'error');

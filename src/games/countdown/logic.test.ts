@@ -6,6 +6,7 @@ import {
   TARGET_MAX,
   TARGET_MIN,
   applyOp,
+  celebration,
   clampLarge,
   currentStreak,
   drawNumbers,
@@ -22,6 +23,7 @@ import {
   reachableValues,
   solve,
   stepsOf,
+  streakMark,
   summarize,
   validateSteps,
   type Expr,
@@ -232,22 +234,62 @@ describe('solver', () => {
     expect(checkSolution([4, 4], 1).value).toBe(1);
   });
 
-  it('solves six numbers in well under 100 ms (median over hard cases)', () => {
+  it('solves every six-number deal in under 100 ms, including the slowest (impossible targets)', () => {
     const rand = mulberry32(21);
     const cases: [number[], number][] = [
       [[100, 75, 50, 25, 10, 9], 1],
       [[7, 8, 3, 3, 4, 9], 997],
       [[25, 50, 75, 100, 1, 1], 997],
+      [[1, 1, 2, 2, 3, 3], 999],
     ];
-    for (let k = 0; k < 9; k++) cases.push([drawNumbers(k % 5, rand), 101 + Math.floor(rand() * 899)]);
+    // Random deals; every other one gets an unreachable target, which forces the exhaustive search.
+    for (let k = 0; k < 40; k++) {
+      const nums = drawNumbers(k % 5, rand);
+      let target = 101 + Math.floor(rand() * 899);
+      if (k % 2 === 0) {
+        const reach = new Set(reachableValues(nums));
+        const missing: number[] = [];
+        for (let v = TARGET_MIN; v <= TARGET_MAX; v++) if (!reach.has(v)) missing.push(v);
+        if (missing.length) target = missing[Math.floor(rand() * missing.length)];
+      }
+      cases.push([nums, target]);
+    }
     solve(cases[0][0], cases[0][1]); // warm up the JIT
+    // Best of three runs per deal filters out GC pauses and scheduler noise, not slow deals.
     const times = cases.map(([n, t]) => {
-      const t0 = performance.now();
-      solve(n, t);
-      return performance.now() - t0;
+      let best = Infinity;
+      for (let r = 0; r < 3; r++) {
+        const t0 = performance.now();
+        solve(n, t);
+        best = Math.min(best, performance.now() - t0);
+      }
+      return best;
     });
     times.sort((a, b) => a - b);
-    expect(times[Math.floor(times.length / 2)]).toBeLessThan(100);
+    expect(times[Math.floor(times.length * 0.95)]).toBeLessThan(100);
+    expect(times[times.length - 1]).toBeLessThan(100);
+  });
+
+  it('gives a shortest derivation of a closest value when the target is impossible', () => {
+    const rand = mulberry32(23);
+    let checked = 0;
+    for (let k = 0; k < 30 && checked < 8; k++) {
+      const nums = drawNumbers(k % 5, rand);
+      const reach = new Set(reachableValues(nums));
+      const missing: number[] = [];
+      for (let v = TARGET_MIN; v <= TARGET_MAX; v++) if (!reach.has(v)) missing.push(v);
+      if (!missing.length) continue;
+      const target = missing[Math.floor(rand() * missing.length)];
+      const s = checkSolution(nums, target);
+      expect(s.diff).toBeGreaterThan(0);
+      // Nothing is closer, and no value at that distance can be built with fewer operations.
+      const near = (ops: number) => reachableValues(nums, target - s.diff, target + s.diff, ops).filter((v) => v !== target);
+      expect(reachableValues(nums, target - s.diff + 1, target + s.diff - 1)).toEqual([]);
+      expect(near(s.steps.length)).toContain(s.value);
+      if (s.steps.length > 0) expect(near(s.steps.length - 1)).toEqual([]);
+      checked++;
+    }
+    expect(checked).toBeGreaterThanOrEqual(5);
   });
 });
 
@@ -347,6 +389,23 @@ describe('Board', () => {
     expect(b.undo()).toBeNull();
   });
 
+  it('scores the closest tile still on the board, not a value that was undone or merged away', () => {
+    const b = new Board([100, 75, 6, 5, 3, 1]);
+    const target = 101;
+    expect(b.closest(target)?.value).toBe(100);
+    b.combine(5, '+', 0); // 1 + 100 = 101, exact
+    expect(b.closest(target)?.value).toBe(101);
+    b.undo();
+    expect(b.closest(target)?.value).toBe(100); // the undone 101 no longer counts
+    b.combine(0, '+', 4); // 103
+    expect(b.closest(target)?.value).toBe(103);
+    b.combine(4, '*', 3); // 103 × 5 = 515: the near value is merged away
+    expect(b.closest(target)?.value).toBe(75);
+    b.reset();
+    expect(b.closest(target)?.value).toBe(100);
+    expect(makeResult(target, b.closest(target)?.value ?? null, 0).points).toBe(7);
+  });
+
   it('finds the closest tile', () => {
     const b = new Board([100, 75, 6, 5, 3, 1]);
     expect(b.closest(80)?.value).toBe(75);
@@ -366,6 +425,25 @@ describe('summary', () => {
     expect(currentStreak([true, false])).toBe(0);
   });
 
+  it('streaks count exact solutions only; a best-possible impossible round neither adds nor breaks', () => {
+    expect(longestStreak(['hit', 'keep', 'hit', 'keep', 'hit'])).toBe(3);
+    expect(currentStreak(['hit', 'keep'])).toBe(1);
+    expect(currentStreak(['hit', 'hit', 'keep', 'keep'])).toBe(2);
+    expect(longestStreak(['keep', 'keep', 'keep'])).toBe(0);
+    expect(currentStreak(['keep'])).toBe(0);
+    expect(longestStreak(['hit', 'keep', 'miss', 'hit'])).toBe(1);
+    expect(currentStreak(['hit', 'miss', 'keep'])).toBe(0);
+  });
+
+  it('marks rounds for the streak', () => {
+    expect(streakMark(makeResult(500, 500, 0))).toBe('hit');
+    expect(streakMark(makeResult(500, 501, 0))).toBe('miss'); // exact was possible
+    expect(streakMark(makeResult(777, 779, 2))).toBe('keep'); // impossible, best possible answer
+    expect(streakMark(makeResult(777, 775, 2))).toBe('keep');
+    expect(streakMark(makeResult(777, 774, 2))).toBe('miss'); // impossible, but not the best
+    expect(streakMark(makeResult(777, null, 2))).toBe('miss');
+  });
+
   it('treats the best possible answer as perfect', () => {
     expect(isPerfect(0, 0)).toBe(true);
     expect(isPerfect(2, 2)).toBe(true);
@@ -375,15 +453,40 @@ describe('summary', () => {
 
   it('totals a game', () => {
     const results = [
-      makeResult(500, 500, 0), // 10, perfect
+      makeResult(500, 500, 0), // 10, exact
       makeResult(500, 503, 0), // 7
-      makeResult(777, 775, 2), // 7, perfect (best possible)
+      makeResult(777, 775, 2), // 7, best possible (keeps, does not extend the streak)
       makeResult(777, 770, 0), // 5
       makeResult(300, null, 0), // 0
-      makeResult(300, 300, 0), // 10, perfect
-      makeResult(300, 300, 0), // 10, perfect
+      makeResult(300, 300, 0), // 10, exact
+      makeResult(300, 300, 0), // 10, exact
     ];
     expect(results.map((r) => r.points)).toEqual([10, 7, 7, 5, 0, 10, 10]);
     expect(summarize(results)).toEqual({ total: 49, exact: 3, perfect: 4, longestStreak: 2, maxTotal: 70 });
+  });
+
+  it('a hard-mode streak only grows with exact answers', () => {
+    const results = [
+      makeResult(400, 400, 0), // hit
+      makeResult(851, 853, 2), // keep
+      makeResult(851, 849, 2), // keep
+      makeResult(620, 620, 0), // hit
+      makeResult(999, 998, 1), // keep
+    ];
+    expect(summarize(results).longestStreak).toBe(2);
+    expect(summarize(results).perfect).toBe(5);
+    expect(summarize([makeResult(851, 853, 2), makeResult(851, 852, 1)]).longestStreak).toBe(0);
+  });
+
+  it('does not celebrate an empty record', () => {
+    const zero = summarize([makeResult(500, 100, 0), makeResult(500, null, 0)]);
+    // Storage reports any first record as new, even a total of 0.
+    expect(celebration(zero, true, false)).toEqual({ bestTotal: false, bestStreak: false, win: false });
+    const low = summarize([makeResult(500, 500, 0), makeResult(500, 100, 0)]);
+    expect(celebration(low, true, true)).toEqual({ bestTotal: true, bestStreak: true, win: true });
+    expect(celebration(low, false, false)).toEqual({ bestTotal: false, bestStreak: false, win: false });
+    const high = summarize(Array.from({ length: 10 }, () => makeResult(500, 503, 0))); // 70, no new record
+    expect(celebration(high, false, false)).toEqual({ bestTotal: false, bestStreak: false, win: true });
+    expect(celebration({ ...low, longestStreak: 0 }, false, true).bestStreak).toBe(false);
   });
 });

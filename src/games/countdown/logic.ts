@@ -307,28 +307,29 @@ function toSolution(e: Expr, target: number): Solution {
   return { value: e.value, diff: Math.abs(e.value - target), steps: stepsOf(e), expr: exprString(e) };
 }
 
-/** Shortest derivation of exactly `value` (null when unreachable). Iterative deepening on #operations. */
-function shortest(numbers: readonly number[], value: number): Expr | null {
-  for (let budget = 0; budget < Math.max(1, numbers.length); budget++) {
-    const s = run(numbers, value, budget, true);
-    if (s.bestDiff === 0 && s.best) return s.best;
-  }
-  return null;
-}
-
 /**
  * Find an exact solution for `target`, or the closest reachable value when none exists, with a
  * shortest list of steps. Each number may be used at most once; every intermediate is a positive integer.
+ *
+ * Iterative deepening on the number of operations: the first budget that hits the target gives a shortest
+ * exact solution. When no budget does, the last pass was the exhaustive search, and the first budget that
+ * reached the final closest distance supplies a shortest derivation of a closest value. Searches with a
+ * smaller budget are much cheaper, so the whole thing costs about one exhaustive search.
  */
 export function solve(numbers: readonly number[], target: number): Solution {
   if (numbers.length === 0) return { value: 0, diff: Math.abs(target), steps: [], expr: '0' };
-  const exact = shortest(numbers, target);
-  if (exact) return toSolution(exact, target);
-  // No exact answer: exhaustive search for the closest value, then its shortest derivation.
-  const full = run(numbers, target, numbers.length - 1, false);
-  const best = full.best as Expr;
-  const short = shortest(numbers, best.value) ?? best;
-  return toSolution(short, target);
+  let found: Expr | null = null;
+  let foundDiff = Infinity;
+  for (let budget = 0; budget < numbers.length; budget++) {
+    const s = run(numbers, target, budget, true);
+    // Strictly closer only: on a tie the earlier (shorter) derivation is kept.
+    if (s.best && s.bestDiff < foundDiff) {
+      found = s.best;
+      foundDiff = s.bestDiff;
+    }
+    if (foundDiff === 0) break;
+  }
+  return toSolution(found as Expr, target);
 }
 
 /** Every value in [lo, hi] that can be built from `numbers` using at most `maxOps` operations. */
@@ -515,20 +516,47 @@ export function makeResult(target: number, answer: number | null, bestDiff: numb
   return { target, answer, diff, bestDiff, points: pointsFor(diff) };
 }
 
-export function longestStreak(flags: readonly boolean[]): number {
+/**
+ * How a round affects the exact-solution streak: `hit` (exact answer) extends it, `miss` breaks it, and
+ * `keep` (a round with no exact solution, answered with the best possible value) neither extends nor breaks it.
+ */
+export type StreakMark = 'hit' | 'keep' | 'miss';
+
+export function streakMark(r: RoundResult): StreakMark {
+  if (r.diff === 0) return 'hit';
+  if (r.bestDiff > 0 && isPerfect(r.diff, r.bestDiff)) return 'keep';
+  return 'miss';
+}
+
+/** `true` counts as a hit and `false` as a miss. */
+function markOf(m: StreakMark | boolean): StreakMark {
+  return m === true ? 'hit' : m === false ? 'miss' : m;
+}
+
+/** Longest run of exact solutions (`keep` rounds are skipped, not counted). */
+export function longestStreak(marks: readonly (StreakMark | boolean)[]): number {
   let best = 0;
   let cur = 0;
-  for (const f of flags) {
-    cur = f ? cur + 1 : 0;
-    if (cur > best) best = cur;
+  for (const raw of marks) {
+    const m = markOf(raw);
+    if (m === 'hit') {
+      cur++;
+      if (cur > best) best = cur;
+    } else if (m === 'miss') {
+      cur = 0;
+    }
   }
   return best;
 }
 
-/** Length of the streak ending at the last element. */
-export function currentStreak(flags: readonly boolean[]): number {
+/** Number of exact solutions in the streak that is still alive after the last round. */
+export function currentStreak(marks: readonly (StreakMark | boolean)[]): number {
   let n = 0;
-  for (let i = flags.length - 1; i >= 0 && flags[i]; i--) n++;
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const m = markOf(marks[i]);
+    if (m === 'miss') break;
+    if (m === 'hit') n++;
+  }
   return n;
 }
 
@@ -541,12 +569,33 @@ export interface Summary {
 }
 
 export function summarize(results: readonly RoundResult[]): Summary {
-  const perfectFlags = results.map((r) => isPerfect(r.diff, r.bestDiff));
   return {
     total: results.reduce((s, r) => s + r.points, 0),
     exact: results.filter((r) => r.diff === 0).length,
-    perfect: perfectFlags.filter(Boolean).length,
-    longestStreak: longestStreak(perfectFlags),
+    perfect: results.filter((r) => isPerfect(r.diff, r.bestDiff)).length,
+    longestStreak: longestStreak(results.map(streakMark)),
     maxTotal: results.length * 10,
   };
+}
+
+/** A finished game at or above this total plays the win fanfare even without a new record. */
+export const WIN_TOTAL = 60;
+
+export interface Celebration {
+  /** Show the "new best total" line. */
+  bestTotal: boolean;
+  /** Show the "new best streak" line. */
+  bestStreak: boolean;
+  /** Play the win sound (otherwise the lose sound). */
+  win: boolean;
+}
+
+/**
+ * What to celebrate at the end of a game. `newBestTotal` / `newBestStreak` are what storage reported
+ * (true for any first record, even 0), so empty records are filtered out here.
+ */
+export function celebration(summary: Summary, newBestTotal: boolean, newBestStreak: boolean): Celebration {
+  const bestTotal = newBestTotal && summary.total > 0;
+  const bestStreak = newBestStreak && summary.longestStreak > 0;
+  return { bestTotal, bestStreak, win: bestTotal || summary.total >= WIN_TOTAL };
 }

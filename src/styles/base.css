@@ -151,6 +151,13 @@ p {
   display: flex;
   gap: 2px;
 }
+/* Leave room for the title when a game adds many header buttons. */
+.header-actions:has(> :nth-child(3)) .icon-btn {
+  width: 38px;
+}
+.header-actions:has(> :nth-child(3)) ~ .icon-btn.rules-btn {
+  width: 36px;
+}
 .icon-btn {
   width: 44px;
   height: 44px;
@@ -167,10 +174,18 @@ p {
   cursor: pointer;
   flex: none;
 }
-.icon-btn.back {
-  font-size: 32px;
-  line-height: 1;
-  padding-bottom: 4px;
+.icon-btn svg {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+.icon-btn.back svg {
+  width: 28px;
+  height: 28px;
+}
+.icon-btn.rules-btn {
+  font-size: 20px;
+  font-weight: 700;
 }
 .icon-btn:active {
   background: var(--surface-2);

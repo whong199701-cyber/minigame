@@ -15,6 +15,7 @@ import {
   ballsLeft,
   beginAim,
   grabRadiusPx,
+  hintBandY,
   isMode,
   isStripe,
   isTap,
@@ -552,6 +553,11 @@ function create(ctx: GameContext): GameInstance {
     if (!game) return;
     updateHud();
     dirty = true;
+    if (e.done) {
+      // No toast here: it would sit on top of the end modal's buttons (the modal already lists scratches).
+      finish();
+      return;
+    }
     const objects = e.pocketed.filter((id) => id !== 0).length;
     if (e.scratch) {
       ctx.play('error');
@@ -559,10 +565,6 @@ function create(ctx: GameContext): GameInstance {
       ctx.toast(t('scratch'), 2200);
     } else if (objects >= 2) {
       ctx.toast(t('combo', { n: objects }), 1600);
-    }
-    if (e.done) {
-      finish();
-      return;
     }
     if (game.phase === 'aim') aimAngle = nearestObjectAngle(game.balls, aimAngle);
     updateStatus();
@@ -916,10 +918,10 @@ function create(ctx: GameContext): GameInstance {
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     const msg = t('placeCue');
-    // Mid-table, well clear of the shell toast that shows at the bottom of the screen after a scratch.
-    const y = H * 0.6;
+    const tw = Math.min(W - 4, g.measureText(msg).width + 8);
+    // Mid-table (well clear of the shell toast at the bottom of the screen) on a band no object ball touches.
+    const y = game ? hintBandY(game.balls, tw / 2, 4) : H * 0.6;
     g.fillStyle = 'rgba(0,0,0,0.35)';
-    const tw = g.measureText(msg).width + 8;
     roundRect(g, W / 2 - tw / 2, y - 4, tw, 8, 4);
     g.fill();
     g.fillStyle = 'rgba(255,255,255,0.95)';

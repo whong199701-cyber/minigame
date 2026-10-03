@@ -52,6 +52,8 @@ export const EXHAUST_REACH = 14;
 /** Lander geometry in local metres (x right, y up, origin at the centre of mass). */
 export const FOOT_X = 3.0;
 export const FOOT_Y = -2.6;
+/** Half-width of the flat pad under each foot (drawn by the renderer, kept clear of rims when settling). */
+export const FOOT_PAD = 0.55;
 export const FEET: readonly (readonly [number, number])[] = [
   [-FOOT_X, FOOT_Y],
   [FOOT_X, FOOT_Y],
@@ -128,7 +130,9 @@ export interface Input {
   rot: number;
 }
 
-export type CrashReason = 'terrain' | 'cliff' | 'offPad' | 'vspeed' | 'hspeed' | 'tilt' | 'hull' | 'lost';
+/** Every way a flight can end badly (the UI needs a message for each one). */
+export const CRASH_REASONS = ['terrain', 'cliff', 'offPad', 'vspeed', 'hspeed', 'tilt', 'hull', 'lost'] as const;
+export type CrashReason = (typeof CRASH_REASONS)[number];
 
 export type Contact =
   | { kind: 'none' }
@@ -200,14 +204,15 @@ export function smoothstep(t: number): number {
 }
 
 // ── Level configuration ───────────────────────────────────────────────────
+/** Pads per campaign level: never more and never wider than the level before (fewer / narrower as you go). */
 const PAD_LAYOUTS: number[][] = [
   [1, 2, 3], // 1
   [1, 2, 3], // 2
   [1, 2, 3], // 3
-  [2, 3], // 4
-  [1, 3], // 5
+  [1, 3], // 4
+  [2, 3], // 5
   [2, 3], // 6 (wind starts)
-  [1, 3], // 7
+  [2, 3], // 7
   [2, 3], // 8
   [3, 3], // 9
   [3, 3], // 10
@@ -216,7 +221,7 @@ const PAD_LAYOUTS: number[][] = [
 export function padsFor(level: number): number[] {
   const n = Math.max(1, Math.floor(level));
   if (n <= CAMPAIGN_LEVELS) return PAD_LAYOUTS[n - 1].slice();
-  return n % 2 === 0 ? [2, 3] : [3, 3];
+  return PAD_LAYOUTS[CAMPAIGN_LEVELS - 1].slice();
 }
 
 /** Deterministic difficulty curve: campaign levels 1–10, then endless escalation with caps. */
@@ -498,8 +503,31 @@ export function checkContact(l: Lander, terrain: Terrain): Contact {
   return { kind: 'none' };
 }
 
-/** Rest the lander squarely on the pad after a successful touchdown. */
-export function settle(l: Lander, pad: Pad): void {
+/**
+ * Margin (m) to keep between a foot and the given pad edge when settling: a whole foot pad when the ground just
+ * outside that edge rises above the pad (a rim the foot pad would otherwise sink into), else none (a drop-off,
+ * where a foot pad may overhang the edge a little).
+ */
+export function padEdgeMargin(terrain: Terrain, pad: Pad, side: -1 | 1): number {
+  const edge = side < 0 ? pad.x0 : pad.x1;
+  for (let d = 0.02; d <= FOOT_PAD + 0.1; d += 0.05) {
+    if (heightAt(terrain, edge + side * d) > pad.y + 1e-6) return FOOT_PAD;
+  }
+  return 0;
+}
+
+/**
+ * Rest the lander squarely on the pad after a successful touchdown. It pivots upright about the foot that touched
+ * down first (so that foot does not slide), then shifts inward if needed so both feet stand on the pad and, next
+ * to a raised rim, neither foot pad sinks into it.
+ */
+export function settle(l: Lander, pad: Pad, terrain?: Terrain): void {
+  const feet = FEET.map((p) => toWorld(l, p));
+  const i = feet[0].y <= feet[1].y ? 0 : 1;
+  const x = feet[i].x - FEET[i][0];
+  const lo = pad.x0 + FOOT_X + (terrain ? padEdgeMargin(terrain, pad, -1) : 0);
+  const hi = pad.x1 - FOOT_X - (terrain ? padEdgeMargin(terrain, pad, 1) : 0);
+  l.x = lo <= hi ? clamp(x, lo, hi) : (pad.x0 + pad.x1) / 2;
   l.angle = 0;
   l.angVel = 0;
   l.vx = 0;
@@ -561,7 +589,7 @@ export function stepLevel(lv: Level, input: Input, dt = DT): 'landed' | 'crashed
   if (c.kind === 'none') return null;
   if (c.kind === 'landed') {
     lv.phase = 'landed';
-    settle(l, c.pad);
+    settle(l, c.pad, lv.terrain);
     lv.outcome = { kind: 'landed', pad: c.pad, score: levelScore(c.pad.mult, l.fuel) };
     return 'landed';
   }

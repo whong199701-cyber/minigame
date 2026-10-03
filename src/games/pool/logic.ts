@@ -729,6 +729,26 @@ export function releasePower(g: AimGesture): number | null {
   return clamp01((g.power - FIRE_MIN) / (1 - FIRE_MIN));
 }
 
+/** Candidate centre lines (fractions of H) for the in-canvas ball-in-hand hint: mid-table first, never down by the
+ * bottom rail where the shell toast sits. */
+export const HINT_BANDS = [0.6, 0.5, 0.68, 0.42, 0.34, 0.74, 0.26] as const;
+
+/** y (table units) of a horizontal band, `halfW` × `halfH` around the table's centre line, that no object ball
+ * touches, so the ball-in-hand hint never sits on top of a ball. Falls back to the first candidate. */
+export function hintBandY(balls: Ball[], halfW: number, halfH: number): number {
+  for (const f of HINT_BANDS) {
+    const y = H * f;
+    let clear = true;
+    for (let i = 1; i < balls.length && clear; i++) {
+      const b = balls[i];
+      if (b.pocketed) continue;
+      if (Math.abs(b.y - y) < halfH + R && Math.abs(b.x - W / 2) < halfW + R) clear = false;
+    }
+    if (clear) return y;
+  }
+  return H * HINT_BANDS[0];
+}
+
 /** Star rating for a finished game: 3 = under par, 2 = par, 1 = over par. */
 export function starsFor(mode: Mode, shots: number): number {
   const par = MODES[mode].par;

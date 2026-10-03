@@ -11,15 +11,16 @@ import {
   MAX_LARGE,
   NUM_COUNT,
   LARGE_POOL,
+  celebration,
   clampLarge,
   currentStreak,
   exprString,
   formatStep,
   generateRound,
-  isCloser,
   isPerfect,
   makeResult,
   pointsFor,
+  streakMark,
   summarize,
   type Mode,
   type Op,
@@ -36,10 +37,10 @@ const strings = {
       '每回合先选大数个数（0–4 个，来自 25 50 75 100），其余是小数（1–10，每个数各两张）。\n' +
       '点一个数字 → 点运算符 → 再点一个数字，两张牌合并成结果。每个数字最多用一次，不必全部用完。\n' +
       '中间结果必须是正整数：不允许分数、0 或负数。\n' +
-      '算出目标数立即结束本回合；否则时间到或点「提交」时，以本回合算出过的最接近的数计分。\n' +
-      '计分：正好 10 分 · 差 1–5 得 7 分 · 差 6–10 得 5 分 · 更远 0 分。一局 10 回合。\n' +
-      '轻松 90 秒、标准 60 秒：保证有解。困难 30 秒：目标更难，约 1/5 无精确解，做到理论最接近同样算连击。\n' +
-      '每回合结束后，求解器会给出一个最短解法。',
+      '算出目标数立即结束本回合；否则时间到或点「提交」时，以场上最接近目标的那张数字计分。\n' +
+      '计分：正好 10 分 · 差 1–5 得 7 分 · 差 6–10 得 5 分 · 更远 0 分。一局 10 回合，每回合后求解器给出一个最短解法。\n' +
+      '轻松 90 秒、标准 60 秒：保证有解。困难 30 秒：目标更难，约 1/5 无精确解。\n' +
+      '连击 = 连续正好命中的回合数。无精确解的回合做到理论最接近时，连击不中断，但也不增加。',
     tagline: '六个数字，一个目标',
     desc: '在倒计时内用加减乘除凑出目标数\n一局 10 回合，挑战最高分',
     modeRelaxed: '轻松',
@@ -104,10 +105,10 @@ const strings = {
       'Each round, choose how many large numbers to draw (0–4, from 25 50 75 100); the rest are small (1–10, two of each).\n' +
       'Tap a number, an operator, then another number: the two merge into the result. Each number can be used once; you need not use them all.\n' +
       'Every intermediate result must be a positive whole number: no fractions, zero or negatives.\n' +
-      'Hit the target and the round ends at once. Otherwise the closest value you made this round counts when time runs out or you lock it in.\n' +
-      'Scoring: exact 10 · 1–5 away 7 · 6–10 away 5 · further 0. A game is 10 rounds.\n' +
-      'Relaxed (90 s) and Normal (60 s) are always solvable. Hard (30 s) has tougher targets and about 1 in 5 is impossible; matching the best possible answer keeps your streak.\n' +
-      'After each round the solver shows a shortest solution.',
+      'Hit the target and the round ends at once. Otherwise, when time runs out or you lock in, the number on the board closest to the target counts.\n' +
+      'Scoring: exact 10 · 1–5 away 7 · 6–10 away 5 · further 0. A game is 10 rounds; after each, the solver shows a shortest solution.\n' +
+      'Relaxed (90 s) and Normal (60 s) are always solvable. Hard (30 s): about 1 in 5 is impossible.\n' +
+      'Streak = exact answers in a row. When no exact answer exists, the best possible one keeps the streak alive without adding to it.',
     tagline: 'Six numbers. One target.',
     desc: 'Reach the target with + − × ÷ before the clock runs out.\n10 rounds per game. Chase a high score.',
     modeRelaxed: 'Relaxed',
@@ -197,6 +198,7 @@ interface GameUI {
   lpHint: HTMLElement;
   drawBtn: HTMLButtonElement;
   steps: HTMLElement;
+  stepsPanel: HTMLElement;
   bestChip: HTMLElement;
   msg: HTMLElement;
   undoBtn: HTMLButtonElement;
@@ -224,12 +226,13 @@ function create(ctx: GameContext): GameInstance {
   /** True right after a merge: the result is pre-selected for chaining. */
   let softSel = false;
   let pendingOp: Op | null = null;
-  let best: { value: number; expr: string; base: boolean } | null = null;
   let deadline = 0;
   let remainingMs = 0;
   let revealStart = 0;
   let pausedAt = 0;
   let paused = false;
+  /** The restart confirmation is open; it holds the pause so nothing may resume the clock behind it. */
+  let confirmOpen = false;
   let lastSec = -1;
   let usedMs = 0;
   let lastRoll = 0;
@@ -275,8 +278,13 @@ function create(ctx: GameContext): GameInstance {
     cancelLater(msgTimer);
     ui.msg.textContent = text;
     ui.msg.className = `cd-msg cd-msg-${tone} cd-show`;
-    const m = ui.msg;
-    msgTimer = later(() => m.classList.remove('cd-show'), 2000);
+    // The header underneath fades out so its text never shows through the notice.
+    ui.stepsPanel.classList.add('cd-msg-on');
+    const { msg: m, stepsPanel: panel } = ui;
+    msgTimer = later(() => {
+      m.classList.remove('cd-show');
+      panel.classList.remove('cd-msg-on');
+    }, 2000);
   };
 
   const clearSel = () => {
@@ -286,7 +294,9 @@ function create(ctx: GameContext): GameInstance {
   };
   const seconds = () => MODES[mode].seconds;
   const totalScore = () => results.reduce((s, r) => s + r.points, 0);
-  const perfectFlags = () => results.map((r) => isPerfect(r.diff, r.bestDiff));
+  const streakNow = () => currentStreak(results.map(streakMark));
+  /** The player's answer: the tile on the board closest to the target (what is scored). */
+  const answerTile = (): Tile | null => (board && spec ? board.closest(spec.target) : null);
 
   // ── Header ────────────────────────────────────────────────────────────────
   const removeRestart = ctx.addHeaderAction({ icon: '↻', label: t('restart'), onClick: () => askRestart() });
@@ -297,15 +307,31 @@ function create(ctx: GameContext): GameInstance {
       showStart();
       return;
     }
+    if (confirmOpen) return;
     const wasPaused = paused;
-    pause(false);
+    // Stop the clock AND hide the board: otherwise the dialog would be free thinking time.
+    pause(true);
+    confirmOpen = true;
     ctx.showModal({
       title: t('restart'),
       body: t('quitConfirm'),
       dismissible: false,
       buttons: [
-        { label: t('cancel'), onClick: () => (!wasPaused ? resume() : undefined) },
-        { label: t('confirm'), primary: true, onClick: () => showStart() },
+        {
+          label: t('cancel'),
+          onClick: () => {
+            confirmOpen = false;
+            if (!wasPaused) resume();
+          },
+        },
+        {
+          label: t('confirm'),
+          primary: true,
+          onClick: () => {
+            confirmOpen = false;
+            showStart();
+          },
+        },
       ],
     });
   }
@@ -315,6 +341,7 @@ function create(ctx: GameContext): GameInstance {
     loop.stop();
     clearAllLater();
     paused = false;
+    confirmOpen = false;
     prepared = null;
     ui = null;
   }
@@ -491,6 +518,7 @@ function create(ctx: GameContext): GameInstance {
       lpHint,
       drawBtn,
       steps,
+      stepsPanel,
       bestChip,
       msg,
       undoBtn,
@@ -517,7 +545,6 @@ function create(ctx: GameContext): GameInstance {
     spec = null;
     board = null;
     clearSel();
-    best = null;
     paused = false;
     renderedMoves = 0;
     ui.targetCard.classList.remove('cd-hit', 'cd-urgent');
@@ -575,8 +602,6 @@ function create(ctx: GameContext): GameInstance {
     spec = prepared && prepared.key === roundKey() ? prepared.spec : generateRound(large, mode);
     prepared = null;
     board = new Board(spec.numbers);
-    const start = board.closest(spec.target) as Tile;
-    best = { value: start.value, expr: String(start.value), base: true };
     clearSel();
     renderedMoves = 0;
     phase = 'reveal';
@@ -662,7 +687,7 @@ function create(ctx: GameContext): GameInstance {
     paused = true;
     pausedAt = performance.now();
     loop.stop();
-    if (showOverlay && phase === 'play') showPauseOverlay();
+    if (showOverlay) showPauseOverlay();
   }
 
   function resume(): void {
@@ -770,9 +795,7 @@ function create(ctx: GameContext): GameInstance {
     selected = to;
     softSel = true;
     pendingOp = null;
-    const v = res.tile.value;
-    if (isCloser(v, best ? best.value : null, spec.target)) best = { value: v, expr: exprString(res.tile), base: false };
-    if (v === spec.target) {
+    if (res.tile.value === spec.target) {
       exactHit();
     } else if (board.count === 1) {
       flash(t('noMoves'), 'info');
@@ -879,7 +902,8 @@ function create(ctx: GameContext): GameInstance {
     paused = false;
     phase = 'result';
     clearSel();
-    const res = makeResult(spec.target, best ? best.value : null, spec.solution.diff);
+    const ans = answerTile();
+    const res = makeResult(spec.target, ans ? ans.value : null, spec.solution.diff);
     results.push(res);
     if (reason === 'time') {
       setTimerVisual(0, 0);
@@ -920,8 +944,9 @@ function create(ctx: GameContext): GameInstance {
     const sub: string[] = [reason === 'exact' ? t('reasonExact', { t: formatTime(usedMs / 1000) }) : reason === 'time' ? t('reasonTime') : t('reasonLock')];
     if (perfect && res.diff) sub.push(t('away', { n: res.diff }));
 
-    const answer = best
-      ? el('div', { class: 'cd-answer' }, best.base ? null : el('span', { class: 'cd-answer-expr', text: `${best.expr} = ` }), el('b', { text: String(best.value) }))
+    const ans = answerTile();
+    const answer = ans
+      ? el('div', { class: 'cd-answer' }, ans.base ? null : el('span', { class: 'cd-answer-expr', text: `${exprString(ans)} = ` }), el('b', { text: String(ans.value) }))
       : el('div', { class: 'cd-answer', text: '—' });
 
     const sol = spec.solution;
@@ -936,7 +961,7 @@ function create(ctx: GameContext): GameInstance {
       ctx.haptic('light');
       next();
     });
-    const streak = currentStreak(perfectFlags());
+    const streak = streakNow();
     const sheet = el(
       'div',
       { class: `cd-sheet cd-tone-${tone}`, role: 'dialog', 'aria-label': title },
@@ -979,11 +1004,12 @@ function create(ctx: GameContext): GameInstance {
     phase = 'done';
     loop.stop();
     const sum = summarize(results);
-    const bestTotal = ctx.storage.recordBest(mode, sum.total, 'higher');
-    const bestStreak = sum.longestStreak > 0 && ctx.storage.recordBest(mode + 'Streak', sum.longestStreak, 'higher');
-    const good = bestTotal || sum.total >= 60;
-    ctx.play(good ? 'win' : 'lose');
-    ctx.haptic(good ? 'success' : 'medium');
+    // A 0 total is still stored (the start screen shows it) but never celebrated.
+    const newTotal = ctx.storage.recordBest(mode, sum.total, 'higher');
+    const newStreak = sum.longestStreak > 0 && ctx.storage.recordBest(mode + 'Streak', sum.longestStreak, 'higher');
+    const { bestTotal, bestStreak, win } = celebration(sum, newTotal, newStreak);
+    ctx.play(win ? 'win' : 'lose');
+    ctx.haptic(win ? 'success' : 'medium');
     ctx.setStatus(`${t(MODE_LABEL[mode])} · ${t('totalSoFar', { n: sum.total })}`);
     const bars = el('div', { class: 'cd-bars' });
     results.forEach((r, i) => {
@@ -1033,7 +1059,7 @@ function create(ctx: GameContext): GameInstance {
     const shown = Math.min(ROUNDS, roundNo + 1);
     ui.hudRound.textContent = `${shown}/${ROUNDS}`;
     ui.hudScore.textContent = String(totalScore());
-    const s = currentStreak(perfectFlags());
+    const s = streakNow();
     ui.hudStreak.textContent = s > 0 ? `🔥${s}` : '0';
   }
 
@@ -1103,13 +1129,14 @@ function create(ctx: GameContext): GameInstance {
       ui.steps.scrollTop = ui.steps.scrollHeight;
     }
     renderedMoves = moves.length;
-    // Closest value reached this round.
+    // Closest number on the board: the value that is scored.
     ui.bestChip.innerHTML = '';
-    if (best && spec && phase !== 'pre') {
-      const diff = Math.abs(best.value - spec.target);
+    const ans = answerTile();
+    if (ans && spec && phase !== 'pre') {
+      const diff = Math.abs(ans.value - spec.target);
       const pts = pointsFor(diff);
       ui.bestChip.append(
-        el('span', { text: t('closest', { v: best.value }) }),
+        el('span', { text: t('closest', { v: ans.value }) }),
         el('span', { class: 'cd-best-diff', text: diff === 0 ? t('exactShort') : t('away', { n: diff }) }),
         el('span', { class: `cd-best-pts cd-p${pts}`, text: t('pts', { n: pts }) }),
       );
@@ -1122,9 +1149,10 @@ function create(ctx: GameContext): GameInstance {
     const hasMoves = !!board && board.moves.length > 0;
     ui.undoBtn.disabled = !inPlay || !hasMoves;
     ui.resetBtn.disabled = !inPlay || !hasMoves;
-    ui.lockBtn.disabled = !inPlay || !best;
+    const ans = answerTile();
+    ui.lockBtn.disabled = !inPlay || !ans;
     const label = ui.lockBtn.querySelector('.cd-btn-label');
-    const lockText = t('lockIn', { v: best ? best.value : '' }).trim();
+    const lockText = t('lockIn', { v: ans ? ans.value : '' }).trim();
     if (label) label.textContent = lockText;
     ui.lockBtn.setAttribute('aria-label', lockText);
     ui.pauseBtn.disabled = !inPlay;
@@ -1164,7 +1192,9 @@ function create(ctx: GameContext): GameInstance {
 
   ctx.onVisibility((visible) => {
     if (!visible) pause(true);
-    else if (phase === 'reveal' && paused) resume(); // the clock has not started yet
+    // The clock has not started during the reveal, so it may carry on by itself, unless the restart
+    // confirmation is holding the pause.
+    else if (phase === 'reveal' && paused && !confirmOpen) resume();
   });
 
   const cleanup = () => {

@@ -741,6 +741,16 @@ describe('strings', () => {
       expect(strings.en[k].length).toBeGreaterThan(0);
     }
   });
+  it('uses one word for the speed level everywhere (HUD, status, banner, result)', () => {
+    // A game-local `level` overrides the common "关卡" (stage), which does not fit an endless game.
+    expect(strings.zh.level).toBe('等级');
+    for (const k of ['levelUp', 'reached']) {
+      expect(strings.zh[k].startsWith(strings.zh.level)).toBe(true);
+      expect(strings.en[k].startsWith(strings.en.level)).toBe(true);
+      expect(strings.zh[k]).not.toContain('关卡');
+      expect(strings.zh[k]).not.toContain('第');
+    }
+  });
 });
 
 describe('computeBoard', () => {

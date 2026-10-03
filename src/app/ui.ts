@@ -127,6 +127,7 @@ export function showModal(opts: ModalOptions): ModalHandle {
     const i = openModals.indexOf(backdrop);
     if (i >= 0) openModals.splice(i, 1);
     setTimeout(() => backdrop.remove(), 160);
+    opts.onClose?.();
   };
   const buttons = opts.buttons ?? [{ label: 'OK', primary: true }];
   const row = el('div', { class: 'modal-actions' });

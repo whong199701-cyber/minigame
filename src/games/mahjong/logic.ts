@@ -543,12 +543,19 @@ export function findClearOrder(pos: readonly Pos[], budget = 20000): [number, nu
 /** Positions up to this count are decided by the exact search before trying the random reverse fill. */
 const EXACT_RESHUFFLE_MAX = 24;
 
+export interface ReshuffleOptions {
+  /** Node budget of the exact search (default: 200 000 for small leftovers, 20 000 above that). */
+  exactBudget?: number;
+}
+
 /**
  * Re-deal the remaining tiles' kinds in place (ids / positions preserved) so that the rest of the
  * game is solvable again. Returns null when no re-deal can help: the remaining positions cannot be
  * emptied in any order (e.g. two tiles stacked on each other), or the kinds cannot be paired.
+ * If the exact search runs out of budget without a verdict, a longer random reverse fill is tried
+ * instead of declaring the position hopeless.
  */
-export function reshuffle(tiles: readonly Tile[], rand: () => number = Math.random): Board | null {
+export function reshuffle(tiles: readonly Tile[], rand: () => number = Math.random, opts: ReshuffleOptions = {}): Board | null {
   if (!tiles.length) return { tiles: [], solution: [] };
   const positions = tiles.map((t) => ({ x: t.x, y: t.y, z: t.z }));
   const pairs = pairsFromKinds(
@@ -559,8 +566,9 @@ export function reshuffle(tiles: readonly Tile[], rand: () => number = Math.rand
   let board: Board | null = null;
   if (positions.length > EXACT_RESHUFFLE_MAX) board = buildBoard(positions, pairs, rand, 60);
   if (!board) {
-    const order = findClearOrder(positions, positions.length > EXACT_RESHUFFLE_MAX ? 20000 : 200000);
-    if (!order) return null;
+    const order = findClearOrder(positions, opts.exactBudget ?? (positions.length > EXACT_RESHUFFLE_MAX ? 20000 : 200000));
+    if (order === null) return null; // proven: these positions cannot be emptied in any order
+    if (order === undefined) return remapBoard(tiles, buildBoard(positions, pairs, rand, 400));
     const dealt: Tile[] = positions.map((p, i) => ({ id: i, x: p.x, y: p.y, z: p.z, kind: -1 }));
     order.forEach(([i, j], p) => {
       dealt[i].kind = pairs[p][0];
@@ -569,7 +577,12 @@ export function reshuffle(tiles: readonly Tile[], rand: () => number = Math.rand
     if (!replaySolver(dealt, order)) return null;
     board = { tiles: dealt, solution: order };
   }
-  // map back to the original ids
+  return remapBoard(tiles, board);
+}
+
+/** Map a board dealt on `tiles`' positions (ids = indices) back to the original tile ids. */
+function remapBoard(tiles: readonly Tile[], board: Board | null): Board | null {
+  if (!board) return null;
   const mapped = board.tiles.map((t, i) => ({ ...t, id: tiles[i].id }));
   const solution = board.solution.map(([a, b]) => [tiles[a].id, tiles[b].id] as [number, number]);
   return { tiles: mapped, solution };
