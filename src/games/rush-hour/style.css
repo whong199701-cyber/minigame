@@ -1,0 +1,116 @@
+/* Parking Escape (rush-hour) — all classes prefixed with .rh- */
+
+.rh-start {
+  gap: 12px;
+}
+.rh-start .rh-desc {
+  font-size: 15px;
+  margin-top: -4px;
+}
+.rh-diff-desc {
+  margin-top: -4px;
+}
+.rh-level-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 340px;
+  margin-top: 4px;
+}
+.rh-level-mid {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.rh-level-label {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rh-level-best {
+  white-space: nowrap;
+}
+.rh-arrow {
+  width: 52px;
+  min-width: 52px;
+  height: 52px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 30px;
+  line-height: 1;
+  font-weight: 400;
+}
+.rh-arrow span {
+  position: relative;
+  top: -2px;
+}
+.rh-progress {
+  margin-top: -2px;
+}
+.rh-play {
+  min-width: 180px;
+  margin-top: 6px;
+}
+
+/* ── Game screen ───────────────────────────────────────────────────── */
+.rh-hud {
+  padding: 6px 14px 2px;
+}
+.rh-hud .stat {
+  flex: 1;
+  min-width: 0;
+}
+.rh-hud .stat-label {
+  white-space: nowrap;
+}
+.rh-hud .stat-value {
+  white-space: nowrap;
+}
+.rh-hud .rh-best {
+  font-size: 15px;
+  line-height: 25px;
+}
+.rh-hud .rh-over {
+  color: var(--warning);
+}
+.rh-area {
+  overflow: hidden;
+}
+.rh-controls {
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: 6px 14px 12px;
+}
+.rh-controls .rh-ctl {
+  flex: 1;
+  min-width: 0;
+  min-height: 46px;
+  padding-left: 6px;
+  padding-right: 6px;
+  font-size: 14px;
+}
+
+/* ── Result modal ──────────────────────────────────────────────────── */
+.rh-result {
+  text-align: center;
+}
+.rh-result-stars {
+  font-size: 34px;
+  letter-spacing: 4px;
+  line-height: 1.2;
+  margin-bottom: 8px;
+}
+.rh-result p {
+  margin: 0 0 4px;
+}
+.rh-new-best {
+  color: var(--warning);
+  font-weight: 700;
+  margin-top: 6px;
+}

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BOARD_BOTTOM_RESERVE,
+  BOARD_PAD_X,
+  BOARD_PAD_Y,
   COMBO_WINDOW,
+  COS30,
   MAX_COMBO,
   MAX_LEVEL,
   MIN_SPAWN_INTERVAL,
@@ -12,10 +16,12 @@ import {
   clearScore,
   colorAt,
   comboMultiplier,
+  computeBoard,
   createSim,
   emptyStacks,
   fallSpeed,
   findGroups,
+  hexApothem,
   isMode,
   levelFor,
   localSide,
@@ -359,5 +365,55 @@ describe('strings', () => {
       expect(strings.zh[k].length).toBeGreaterThan(0);
       expect(strings.en[k].length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('computeBoard', () => {
+  const sizes: [number, number][] = [
+    [390, 720], // iPhone portrait (canvas under header + HUD)
+    [360, 640],
+    [320, 520],
+    [768, 900],
+    [844, 300], // landscape phone
+    [1024, 700],
+  ];
+  it('keeps the spawn point on screen in every lane and the ring inside the canvas', () => {
+    for (const m of MODE_LIST) {
+      const cfg = MODES[m];
+      const gap = spawnDistance(cfg) - cfg.maxLevels;
+      for (const [w, h] of sizes) {
+        const b = computeBoard(w, h, cfg);
+        expect(b.lvl).toBeGreaterThan(0);
+        expect(b.a0).toBeLessThan(b.R);
+        expect(b.a0).toBe(hexApothem(b.R));
+        expect(b.cx).toBe(w / 2);
+        // Horizontal lanes: the whole just-spawned block (outer edge included) is inside the canvas.
+        expect(b.R + (gap + 1) * b.lvl).toBeLessThanOrEqual(w / 2 - BOARD_PAD_X + 1e-6);
+        // Diagonal lanes: the spawn block's outer corner stays inside vertically.
+        const outer = (b.R + (gap + 1) * b.lvl) / COS30;
+        expect(b.cy - outer).toBeGreaterThanOrEqual(BOARD_PAD_Y - 1e-6);
+        expect(b.cy + outer).toBeLessThanOrEqual(h - BOARD_PAD_Y - BOARD_BOTTOM_RESERVE + 1e-6);
+        // Ring (circumradius) inside the canvas.
+        expect(b.R / COS30).toBeLessThanOrEqual(Math.min(b.cy, h - b.cy));
+        expect(b.R).toBeLessThanOrEqual(w / 2);
+        // The overflow level (index maxLevels) is drawn just outside the ring.
+        expect(b.a0 + cfg.maxLevels * b.lvl).toBeCloseTo(b.R);
+      }
+    }
+  });
+  it('uses the available width on a portrait phone and grows with it', () => {
+    const cfg = MODES.medium;
+    const phone = computeBoard(390, 720, cfg);
+    expect(phone.R).toBeGreaterThan(125);
+    expect(phone.lvl).toBeGreaterThan(12);
+    const wide = computeBoard(600, 720, cfg);
+    expect(wide.R).toBeGreaterThan(phone.R);
+    const short = computeBoard(390, 300, cfg);
+    expect(short.R).toBeLessThan(phone.R);
+  });
+  it('hexApothem is clamped and proportional in between', () => {
+    expect(hexApothem(50)).toBe(24);
+    expect(hexApothem(1000)).toBe(44);
+    expect(hexApothem(150)).toBeCloseTo(33);
   });
 });

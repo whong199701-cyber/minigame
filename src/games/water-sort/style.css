@@ -1,0 +1,175 @@
+/* Water Sort — all classes prefixed with .ws- */
+
+.ws-start {
+  justify-content: flex-start;
+  gap: 0;
+  padding: 12px 20px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.ws-start-inner {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.ws-start .big-icon {
+  margin-bottom: 2px;
+}
+.ws-start h2 {
+  margin-top: 2px;
+}
+.ws-desc {
+  max-width: 300px;
+}
+.ws-stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.ws-step {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ws-step:active {
+  transform: scale(0.94);
+}
+.ws-step:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.ws-level-title {
+  min-width: 120px;
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.ws-level-sub {
+  font-size: 13px;
+  min-height: 18px;
+}
+.ws-challenge {
+  color: var(--warning);
+  font-weight: 600;
+}
+.ws-picker {
+  width: 100%;
+  max-width: 360px;
+  max-height: 112px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-radius: 12px;
+  touch-action: pan-y;
+}
+.ws-chip {
+  min-width: 50px;
+  height: 46px;
+  padding: 0 6px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.05;
+  gap: 1px;
+}
+.ws-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.ws-chip.challenge {
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--border));
+}
+.ws-chip .ws-stars {
+  font-size: 9px;
+  letter-spacing: -0.5px;
+  color: var(--warning);
+}
+.ws-chip.active .ws-stars {
+  color: var(--accent-text);
+}
+.ws-best {
+  min-height: 20px;
+}
+.ws-play {
+  min-width: 180px;
+}
+
+/* ── In-game ───────────────────────────────────────────────────────── */
+.ws-hud {
+  padding: 6px 12px 2px;
+}
+.ws-hud .stat {
+  min-width: 0;
+  flex: 1;
+}
+.ws-hud .stat-value {
+  font-size: 17px;
+  white-space: nowrap;
+}
+.ws-hud .stat-value.ws-stars-value {
+  color: var(--warning);
+  letter-spacing: 1px;
+}
+.ws-hud .stat-label {
+  white-space: nowrap;
+}
+.ws-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.ws-controls {
+  padding: 6px 14px 10px;
+  gap: 10px;
+}
+.ws-controls .btn {
+  min-width: 120px;
+}
+.ws-result {
+  text-align: center;
+}
+.ws-result-stars {
+  font-size: 40px;
+  line-height: 1.1;
+  color: var(--warning);
+  letter-spacing: 4px;
+  margin: 4px 0 8px;
+}
+.ws-result-stars .dim {
+  color: var(--border);
+}
+.ws-result p {
+  margin: 4px 0;
+}
+.ws-result .ws-new-best {
+  color: var(--success);
+  font-weight: 700;
+}

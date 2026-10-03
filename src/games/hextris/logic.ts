@@ -295,3 +295,49 @@ export function pickColor(stacks: Stacks, colors: number, rand: () => number, bi
   }
   return Math.min(colors - 1, Math.floor(rand() * colors));
 }
+
+// ── Board geometry ──────────────────────────────────────────────────────
+
+export interface Board {
+  cx: number;
+  cy: number;
+  /** Apothem of the boundary ring (CSS px). */
+  R: number;
+  /** Apothem of the central hexagon. */
+  a0: number;
+  /** Radial thickness of one block level. */
+  lvl: number;
+}
+
+export const COS30 = Math.cos(Math.PI / 6);
+export const BOARD_PAD_X = 6;
+export const BOARD_PAD_Y = 8;
+/** Vertical space kept free at the bottom of the canvas (below any falling block) for the combo readout. */
+export const BOARD_BOTTOM_RESERVE = 60;
+
+export function hexApothem(R: number): number {
+  return Math.min(44, Math.max(24, R * 0.22));
+}
+
+/**
+ * Size a pointy-top board for a `w × h` canvas so that a block is *fully* on screen the moment it
+ * spawns, in every lane, so no direction gets less warning than another. In portrait the horizontal
+ * lanes are the tight ones: the spawn block's outer edge sits at `R + (gap+1)·lvl` from the centre and
+ * must stay inside `w/2` (a diagonal lane's outer corner reaches the same x). Vertically the diagonal
+ * lanes' outer corner reaches `(R + (gap+1)·lvl) / cos30°` and must fit too.
+ */
+export function computeBoard(w: number, h: number, cfg: ModeConfig): Board {
+  const N = cfg.maxLevels;
+  const gap = spawnDistance(cfg) - N;
+  const cy = Math.round(h * 0.47);
+  const vRoom = Math.min(cy - BOARD_PAD_Y, h - cy - BOARD_PAD_Y - BOARD_BOTTOM_RESERVE);
+  let R = 100;
+  for (let i = 0; i < 4; i++) {
+    const a0 = hexApothem(R);
+    const Rh = (w / 2 - BOARD_PAD_X + ((gap + 1) * a0) / N) / (1 + (gap + 1) / N);
+    const Rv = (vRoom * COS30 + ((gap + 1) * a0) / N) / (1 + (gap + 1) / N);
+    R = Math.max(56, Math.min(Rh, Rv));
+  }
+  const a0 = hexApothem(R);
+  return { cx: w / 2, cy, R, a0, lvl: (R - a0) / N };
+}

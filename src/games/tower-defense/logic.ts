@@ -17,8 +17,10 @@ export const WAVES_PER_MAP = 20;
 export const COUNTDOWN = 10;
 export const SLOW_CAP = 0.65;
 export const SELL_RATIO = 0.7;
-export const HP_GROWTH = 1.15;
+export const HP_GROWTH = 1.18;
 export const MAX_LEVEL = 3;
+/** Seconds a frost slow lingers after the enemy leaves the aura. */
+export const AURA_LINGER = 0.4;
 export const TOWER_TYPES: TowerType[] = ['arrow', 'cannon', 'frost', 'sniper'];
 export const ENEMY_TYPES: EnemyType[] = ['normal', 'fast', 'tank', 'flying', 'boss'];
 
@@ -64,7 +66,7 @@ export const MAPS: MapDef[] = [
       [7, 1],
       [7, 12],
     ],
-    hpMult: 1.15,
+    hpMult: 1.1,
   },
   {
     id: 'spiral',
@@ -83,7 +85,7 @@ export const MAPS: MapDef[] = [
       [4, 4],
       [4, 8],
     ],
-    hpMult: 1.45,
+    hpMult: 1.35,
   },
 ];
 
@@ -125,6 +127,7 @@ export function validateMap(map: MapDef): string | null {
       seen.add(key);
     }
   }
+  if (seen.size >= cols * rows - 4) return 'not enough buildable cells';
   return null;
 }
 
@@ -199,15 +202,14 @@ export function pointOnPath(geom: PathGeom, dist: number, segHint = 0): { x: num
 export interface TowerLevel {
   dmg: number;
   range: number;
-  /** Shots per second. */
+  /** Shots (or aura pulses) per second. */
   rate: number;
   /** Build cost for level 1, upgrade cost for levels 2 and 3. */
   cost: number;
   /** Splash radius in cells (cannon). */
   splash?: number;
-  /** Slow fraction and duration (frost). */
+  /** Slow fraction applied to every enemy inside the aura (frost). */
   slow?: number;
-  slowDur?: number;
 }
 
 export interface TowerDef {
@@ -216,8 +218,10 @@ export interface TowerDef {
   hitsFlying: boolean;
   /** Damage multiplier against bosses. */
   bossMult: number;
-  /** Projectile speed in cells / s; 0 = instant hit. */
+  /** Projectile speed in cells / s; 0 = instant hit (tracer). */
   projectileSpeed: number;
+  /** Aura tower: slows everything in range continuously and pulses damage at `rate`. */
+  aura: boolean;
   defaultTargeting: Targeting;
 }
 
@@ -225,49 +229,53 @@ export const TOWER_DEFS: Record<TowerType, TowerDef> = {
   arrow: {
     type: 'arrow',
     levels: [
-      { dmg: 7, range: 2.3, rate: 2.5, cost: 50 },
-      { dmg: 12, range: 2.6, rate: 2.9, cost: 45 },
-      { dmg: 21, range: 2.9, rate: 3.3, cost: 85 },
+      { dmg: 8, range: 2.3, rate: 2.5, cost: 50 },
+      { dmg: 14, range: 2.6, rate: 2.9, cost: 45 },
+      { dmg: 25, range: 2.9, rate: 3.3, cost: 85 },
     ],
     hitsFlying: true,
     bossMult: 1,
     projectileSpeed: 9,
+    aura: false,
     defaultTargeting: 'first',
   },
   cannon: {
     type: 'cannon',
     levels: [
-      { dmg: 26, range: 2.1, rate: 0.7, cost: 90, splash: 0.9 },
-      { dmg: 46, range: 2.4, rate: 0.75, cost: 80, splash: 1.0 },
-      { dmg: 80, range: 2.7, rate: 0.8, cost: 140, splash: 1.15 },
+      { dmg: 28, range: 2.1, rate: 0.7, cost: 90, splash: 0.9 },
+      { dmg: 50, range: 2.4, rate: 0.75, cost: 80, splash: 1.0 },
+      { dmg: 90, range: 2.7, rate: 0.8, cost: 140, splash: 1.15 },
     ],
     hitsFlying: false,
     bossMult: 1,
     projectileSpeed: 5,
+    aura: false,
     defaultTargeting: 'first',
   },
   frost: {
     type: 'frost',
     levels: [
-      { dmg: 3, range: 2.0, rate: 1.2, cost: 70, slow: 0.3, slowDur: 1.6 },
-      { dmg: 5, range: 2.3, rate: 1.3, cost: 60, slow: 0.4, slowDur: 1.8 },
-      { dmg: 8, range: 2.6, rate: 1.5, cost: 100, slow: 0.5, slowDur: 2.0 },
+      { dmg: 6, range: 1.8, rate: 1.0, cost: 70, slow: 0.3 },
+      { dmg: 11, range: 2.1, rate: 1.0, cost: 60, slow: 0.4 },
+      { dmg: 18, range: 2.4, rate: 1.1, cost: 100, slow: 0.5 },
     ],
     hitsFlying: false,
     bossMult: 1,
-    projectileSpeed: 7,
+    projectileSpeed: 0,
+    aura: true,
     defaultTargeting: 'first',
   },
   sniper: {
     type: 'sniper',
     levels: [
-      { dmg: 55, range: 4.2, rate: 0.45, cost: 120 },
-      { dmg: 100, range: 4.7, rate: 0.5, cost: 110 },
-      { dmg: 180, range: 5.2, rate: 0.55, cost: 180 },
+      { dmg: 60, range: 4.2, rate: 0.45, cost: 120 },
+      { dmg: 110, range: 4.7, rate: 0.5, cost: 110 },
+      { dmg: 200, range: 5.2, rate: 0.55, cost: 180 },
     ],
     hitsFlying: true,
     bossMult: 2,
     projectileSpeed: 0,
+    aura: false,
     defaultTargeting: 'strongest',
   },
 };
@@ -371,6 +379,10 @@ export function waveComposition(wave: number): SpawnGroup[] {
   return groups;
 }
 
+export function waveHasBoss(wave: number): boolean {
+  return waveComposition(wave).some((g) => g.type === 'boss');
+}
+
 /** Flattens spawn groups into timed spawn items (1 s pause between groups). */
 export function expandWave(groups: SpawnGroup[]): SpawnItem[] {
   const items: SpawnItem[] = [];
@@ -436,8 +448,6 @@ export interface Projectile {
   speed: number;
   dmg: number;
   splash: number;
-  slow: number;
-  slowDur: number;
   src: number;
   bossMult: number;
   done: boolean;
@@ -446,6 +456,7 @@ export interface Projectile {
 export type GameEvent =
   | { type: 'shoot'; tower: TowerType; x: number; y: number }
   | { type: 'tracer'; x1: number; y1: number; x2: number; y2: number }
+  | { type: 'pulse'; x: number; y: number; range: number; hits: number }
   | { type: 'hit'; kind: TowerType; x: number; y: number; splash: number }
   | { type: 'kill'; enemy: EnemyType; x: number; y: number; reward: number }
   | { type: 'leak'; enemy: EnemyType; lives: number }
@@ -726,6 +737,7 @@ function findEnemy(s: GameState, id: number): Enemy | undefined {
   return s.enemies.find((e) => e.id === id);
 }
 
+/** Applies damage; returns true when this hit killed the enemy. */
 export function damage(e: Enemy, amount: number, src: number): boolean {
   if (e.hp <= 0) return false;
   e.hp -= amount;
@@ -754,8 +766,6 @@ function fire(s: GameState, t: Tower, def: TowerDef, lv: TowerLevel, target: Ene
     speed: def.projectileSpeed,
     dmg: lv.dmg,
     splash: lv.splash ?? 0,
-    slow: lv.slow ?? 0,
-    slowDur: lv.slowDur ?? 0,
     src: t.id,
     bossMult: def.bossMult,
     done: false,
@@ -774,13 +784,37 @@ function impact(s: GameState, p: Projectile, target: Enemy | null): void {
   }
   if (!target) return;
   damage(target, p.dmg * (target.type === 'boss' ? p.bossMult : 1), p.src);
-  if (p.slow > 0) applySlow(target, p.src, p.slow, p.slowDur, s.time);
+}
+
+/** Frost aura: slow everything in range every tick, pulse damage at the tower's rate. */
+function runAura(s: GameState, t: Tower, def: TowerDef, lv: TowerLevel): void {
+  let any = false;
+  for (const e of s.enemies) {
+    if (!canHit(def, e) || !inRange(t, lv.range, e)) continue;
+    applySlow(e, t.id, lv.slow ?? 0, AURA_LINGER, s.time);
+    any = true;
+  }
+  if (!any) {
+    if (t.cooldown < 0) t.cooldown = 0;
+    t.targetId = null;
+    return;
+  }
+  if (t.cooldown > 0) return;
+  t.cooldown = 1 / lv.rate;
+  let hits = 0;
+  for (const e of s.enemies) {
+    if (!canHit(def, e) || !inRange(t, lv.range, e)) continue;
+    damage(e, lv.dmg * (e.type === 'boss' ? def.bossMult : 1), t.id);
+    hits++;
+  }
+  s.events.push({ type: 'pulse', x: t.x, y: t.y, range: lv.range, hits });
 }
 
 // ── Main step ───────────────────────────────────────────────────────────────
 
 /** Advances the simulation by `dt` seconds (call with small steps, ≤ 1/30 s, for stable combat). */
 export function tick(s: GameState, dt: number): void {
+  if (dt <= 0) return;
   if (s.phase === 'ready' || s.phase === 'over' || s.phase === 'cleared') return;
   s.time += dt;
   processSpawns(s, dt);
@@ -804,6 +838,10 @@ export function tick(s: GameState, dt: number): void {
     t.cooldown -= dt;
     const def = TOWER_DEFS[t.type];
     const lv = def.levels[t.level - 1];
+    if (def.aura) {
+      runAura(s, t, def, lv);
+      continue;
+    }
     let target = t.targetId === null ? undefined : findEnemy(s, t.targetId);
     if (target && (!canHit(def, target) || !inRange(t, lv.range + 0.15, target))) target = undefined;
     if (!target) {

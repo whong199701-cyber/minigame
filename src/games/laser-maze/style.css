@@ -1,0 +1,115 @@
+/* Laser Maze — all classes prefixed with .lm- */
+.lm-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.lm-hud {
+  flex: none;
+  padding: 8px 12px 10px;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.lm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.lm-chip:active {
+  transform: scale(0.96);
+}
+.lm-chip-icon {
+  font-size: 15px;
+  color: var(--muted);
+}
+.lm-mirrors {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+}
+.lm-mi {
+  position: relative;
+  width: 16px;
+  height: 24px;
+}
+.lm-mi::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 22px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: translate(-50%, -50%) rotate(45deg);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.lm-mi.used::before {
+  background: var(--border);
+  box-shadow: none;
+}
+.lm-targets.lm-done {
+  color: var(--success);
+}
+.lm-shake {
+  animation: lm-shake 0.4s ease;
+}
+@keyframes lm-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-5px);
+  }
+  40% {
+    transform: translateX(5px);
+  }
+  60% {
+    transform: translateX(-4px);
+  }
+  80% {
+    transform: translateX(4px);
+  }
+}
+.lm-start {
+  gap: 12px;
+}
+.lm-track {
+  max-width: 320px;
+}
+.lm-level-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lm-level-pick .lm-step {
+  min-width: 48px;
+  min-height: 44px;
+  padding: 8px 0;
+  font-size: 15px;
+}
+.lm-level-label {
+  min-width: 120px;
+  font-size: 20px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.lm-play {
+  min-width: 160px;
+}

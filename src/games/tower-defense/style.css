@@ -109,7 +109,8 @@
   flex: 1;
   min-height: 0;
   position: relative;
-  overflow: hidden;
+  /* Menus may extend past the board on very short (landscape) viewports. */
+  overflow: visible;
 }
 .td-area canvas {
   touch-action: none;
@@ -167,7 +168,7 @@
 /* Context menu (build / tower) */
 .td-menu {
   position: absolute;
-  z-index: 4;
+  z-index: 7;
   width: 236px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -291,4 +292,59 @@
 }
 .td-pause .btn {
   min-width: 160px;
+}
+
+/* Start screen additions */
+.td-start {
+  gap: 12px;
+  padding: 16px 20px;
+}
+.td-start .big-icon {
+  font-size: 56px;
+}
+.td-start-desc {
+  max-width: 320px;
+  line-height: 1.35;
+}
+.td-best {
+  min-height: 20px;
+}
+.td-play {
+  min-width: 180px;
+}
+.td-map-cleared[hidden] {
+  display: none;
+}
+
+/* Menu money label */
+.td-menu-money {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.td-menu .td-target-btn {
+  width: 100%;
+}
+.td-stats > div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 2px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.td-stats .up {
+  min-height: 12px;
+}
+
+/* Pause overlay */
+.td-pause-icon {
+  font-size: 40px;
+  line-height: 1;
+}
+.td-pause h2 {
+  font-size: 24px;
+}
+.td-pause .btn {
+  min-width: 180px;
 }

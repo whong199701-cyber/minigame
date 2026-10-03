@@ -1,0 +1,71 @@
+/* Circuit Rotate (netwalk) — every class is prefixed with .nw- */
+
+.nw-start {
+  gap: 12px;
+}
+.nw-start .segmented {
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.nw-start .seg {
+  padding: 6px 11px;
+  min-width: 64px;
+}
+.nw-tagline {
+  max-width: 300px;
+  font-size: 15px;
+}
+.nw-desc {
+  font-size: 14px;
+  min-height: 20px;
+}
+.nw-best {
+  min-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.nw-hud {
+  padding: 6px 14px 2px;
+}
+.nw-hud .stat-value {
+  font-size: 17px;
+}
+.nw-area {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.nw-footer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 14px 10px;
+}
+.nw-tip {
+  font-size: 12px;
+}
+.nw-buttons {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.nw-buttons .btn {
+  min-width: 128px;
+}
+.nw-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nw-result .nw-good {
+  color: var(--success);
+  font-weight: 600;
+}
+.nw-result .nw-best-line {
+  color: var(--warning);
+  font-weight: 600;
+}
+.nw-start .btn-primary {
+  min-width: 160px;
+}

@@ -1,7 +1,25 @@
 /* Hex Stack — all classes prefixed with .hx- */
+
+/* CSS-drawn hexagon icon (no font glyph, so it renders identically everywhere). */
+.hx-icon-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 8px 18px color-mix(in srgb, var(--accent) 45%, transparent));
+}
 .hx-icon {
-  color: var(--accent);
-  filter: drop-shadow(0 6px 14px color-mix(in srgb, var(--accent) 45%, transparent));
+  width: 64px;
+  height: 72px;
+  background: linear-gradient(160deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 60%, var(--accent-2)) 100%);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+}
+.hx-icon-overlay .hx-icon {
+  width: 48px;
+  height: 54px;
+}
+
+.hx-start {
+  gap: 12px;
 }
 .hx-desc {
   max-width: 320px;
@@ -11,12 +29,21 @@
 .hx-mode-desc {
   min-height: 18px;
 }
+.hx-best {
+  font-size: 15px;
+}
+.hx-play {
+  min-width: 160px;
+  margin-top: 4px;
+}
 .hx-hint {
   font-size: 12px;
   letter-spacing: 0.02em;
 }
+
 .hx-hud {
   padding: 6px 14px 2px;
+  justify-content: space-evenly;
 }
 .hx-hud .stat-value {
   font-variant-numeric: tabular-nums;
@@ -24,6 +51,7 @@
 .hx-hud .hx-score {
   color: var(--accent);
 }
+
 .hx-area {
   flex: 1;
   min-height: 0;
@@ -37,11 +65,6 @@
 .hx-overlay[hidden] {
   display: none;
 }
-.hx-overlay-icon {
-  font-size: 54px;
-  line-height: 1;
-  color: var(--accent);
-}
 .hx-overlay h2 {
   font-size: 24px;
 }
@@ -50,14 +73,19 @@
   color: var(--muted);
   max-width: 300px;
 }
+
 .hx-result {
   text-align: center;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
+.hx-result-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 .hx-result-score {
-  font-size: 38px;
+  font-size: 40px;
   font-weight: 800;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
