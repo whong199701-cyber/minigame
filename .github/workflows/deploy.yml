@@ -1,8 +1,8 @@
 name: Deploy to GitHub Pages
 
+# Publishes whenever the repository's default branch is pushed (whatever it is named).
 on:
   push:
-    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -10,12 +10,14 @@ permissions:
   pages: write
   id-token: write
 
+# Scope by branch so a push elsewhere never cancels a running deployment.
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: pages-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

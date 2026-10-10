@@ -33,8 +33,8 @@ dark & light themes, synthesized sound effects and haptic feedback.
 
 ## 在手机上玩 · Play on a phone
 
-部署到 GitHub Pages 后，用手机浏览器打开链接，在菜单里选择「添加到主屏幕」，即可像 App 一样全屏运行，
-首次打开后可离线使用。
+用手机浏览器打开 https://whong199701-cyber.github.io/minigame/ ，在菜单里选择「添加到主屏幕」，即可像 App 一样
+全屏运行，首次打开后可离线使用。
 
 ## 单文件版 · Single-file build
 
@@ -55,5 +55,6 @@ See `docs/GAME_DEV_GUIDE.md` for how a game module is structured and `docs/brief
 
 ## 部署 · Deploy
 
-Pushing to `main` runs `.github/workflows/deploy.yml`, which builds with `BASE_PATH=/<repo>/` and publishes to
-GitHub Pages. Enable Pages once in the repository settings (Settings → Pages → Source: GitHub Actions).
+Pushing to the default branch runs `.github/workflows/deploy.yml`, which builds with `BASE_PATH=/<repo>/` and
+publishes to GitHub Pages at https://whong199701-cyber.github.io/minigame/ . Pages must be enabled once in the
+repository settings (Settings → Pages → Source: GitHub Actions).
