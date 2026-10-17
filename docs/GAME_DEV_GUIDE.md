@@ -81,7 +81,8 @@ create(ctx) {
 8. **Theme**: looks right in dark AND light themes (run the smoke test with `--light`).
 9. **Lifecycle**: everything created is cleaned up in `destroy()` / `onDestroy` (intervals, rAF loops, listeners, observers). Pause loops on `onVisibility(false)`.
 10. **Pure logic in `logic.ts` with unit tests** (generation validity, win detection, solver / solvability, edge cases).
-11. **No new dependencies, no network, no external assets** (draw everything with canvas/CSS/emoji).
+11. **No new dependencies, no network, no external assets** (draw everything with canvas/CSS/emoji). One exception:
+    `tower-defense` renders with Three.js (`three`), lazy-loaded with that game's chunk only.
 12. **No changes outside your folder** (`src/app/*`, `src/games/<other>/*`, `registry.ts`, `package.json` are off-limits).
 
 ## Verifying your game
