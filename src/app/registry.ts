@@ -110,9 +110,9 @@ export const games: GameMeta[] = [
   {
     id: 'tower-defense',
     category: 'action',
-    icon: '🏰',
-    name: { zh: '迷你塔防', en: 'Mini Tower Defense' },
-    tagline: { zh: '多地图、多波次、多塔种', en: 'Maps, waves and tower types' },
+    icon: '🦠',
+    name: { zh: '免疫防线', en: 'Immune Front' },
+    tagline: { zh: '3D 免疫细胞塔防：英雄、技能、疫苗记忆', en: '3D immune-cell defense: hero, abilities, vaccines' },
     load: () => import('../games/tower-defense/index'),
   },
   {
