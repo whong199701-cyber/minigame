@@ -22,7 +22,7 @@ dark & light themes, synthesized sound effects and haptic feedback.
 | 牌桌游戏 | 图形集合 Set Match | 经典 / 限时两种模式 |
 | 牌桌游戏 | 麻将对对碰 Mahjong Solitaire | 三种布局，保证可解 |
 | 动作物理 | 台球清台 Pool Clear | 真实物理，最少杆数清台 |
-| 动作物理 | 迷你塔防 Mini Tower Defense | 多地图、多波次、四种塔可升级 |
+| 动作物理 | 免疫防线 Immune Front | 真 3D 免疫细胞塔防：8 种塔、英雄小白、4 个技能、4 张器官地图、疫苗记忆与天赋树 |
 | 动作物理 | 六边形俄罗斯 Hex Stack | 旋转六边形接方块、三消连击 |
 | 动作物理 | 登月着陆 Lunar Lander | 推进器与燃料物理，战役 + 无尽模式 |
 | 动作物理 | 迷你高尔夫 Mini Golf | 18 洞物理推杆 |

@@ -1,9 +1,10 @@
-# Immune Front · 免疫防线 — numeric design spec (v2, revision 2 after review)
+# Immune Front · 免疫防线 — numeric design spec (v2, revision 3: bot balance pass)
 
 Companion to `tower-defense.md` (concept, authoritative for *what*). This file is authoritative for *numbers* and
 *contracts*: every value a programmer needs is here, and the TypeScript contracts live in
 `src/games/tower-defense/types.ts`. Logic, renderer and UI are built against these two files in parallel.
-§16 lists what changed in this revision and why; §15 is the arithmetic the numbers were checked against.
+§16 lists what changed in revision 2 and why; §15 is the arithmetic the revision-2 numbers were checked against and
+§15.1 the headless bot pass (revision 3) that retuned them — where the two disagree, §15.1 and the tables below win.
 
 Conventions used throughout:
 
@@ -17,8 +18,9 @@ Conventions used throughout:
   `nextAt`), never as countdowns, so pausing and saving are free. Frame-loop contract: §7.10.
 - **Multipliers** are combined multiplicatively unless a formula says "additive". Values are rounded only where a
   formula says `round`/`floor`/`ceil`.
-- **Wave growth** `g(w)`: `1.15^(w-1)` for `w ≤ 20`; `g(20) · 1.12^(w-20)` for `w > 20` (endless).
-  Reference: g(1)=1.00 · g(5)=1.75 · g(10)=3.52 · g(15)=7.08 · g(20)=14.23 · g(25)=25.1 · g(30)=44.2.
+- **Wave growth** `g(w)`: `1.22^(w-1)` for `w ≤ 20`; `g(20) · 1.06^(w-20)` for `w > 20` (endless) — `HP_GROWTH` /
+  `ENDLESS_GROWTH` in `sim/data.ts`. Reference: g(1)=1.00 · g(2)=1.22 · g(3)=1.49 · g(5)=2.22 · g(10)=5.99 ·
+  g(15)=16.18 · g(20)=43.74 · g(25)=58.5 · g(30)=78.3 · g(35)=104.8 (rev. 2 used 1.15 / 1.12; §15.1 explains why).
   Several tower effects scale with `g(w)^0.5` (§2.4, §2.3) or with the target's maxHP (§2.2, §2.8) so they never
   become irrelevant; the UI's DPS lines are computed from those formulas, never from flat numbers.
 - **Determinism**: logic.ts never calls `Math.random` (a unit test greps for it); `GameState.rng` is reserved and
@@ -44,7 +46,9 @@ Common rules:
 - `maxBarriers = 3` living barriers per map. Barriers cannot be built on the first 3 or last 3 cells of any path
   (counted from the spawn / to the core), nor on the core.
 - `hpMult` scales enemy HP per map (path-length balance): Vessel 1.0 · Alveoli **0.9** (all-with-flow, shortest time
-  under fire) · Gut 1.2 (47 cells, longest) · Brain 1.0.
+  under fire) · Gut **1.0** (47 cells, but only 21 sparse pads + 8 villi) · Brain **0.8** (two 26-cell paths that split
+  the defense). Bosses additionally take `BOSS_HP_MULT[map]` (Vessel / Alveoli / Gut 1.0 · **Brain 0.7**): a Brain boss
+  walks one of two paths that never merge, so it faces about half the towers (§15.1).
 - Map unlock: Vessel, Alveoli, Gut always; **Brain unlocks at 6 total stars** (§10). **Hard** on a map unlocks when
   that map has ≥ 1 star on normal.
 - Pads are checkerboarded, so a beacon's buff disc covers **0–7 other pads** depending on map and position — typically
@@ -159,7 +163,7 @@ reveal radius), **capped at +0.5 for towers whose base range is ≥ 3.5** (the T
 
 | field | value |
 |---|---|
-| id | `gut` · cols 10 · rows 15 · hpMult 1.2 · unlockStars 0 |
+| id | `gut` · cols 10 · rows 15 · hpMult **1.0** · unlockStars 0 |
 | path A | (0,1) (8,1) (8,4) (1,4) (1,7) (8,7) (8,10) (1,10) (1,13) (5,13) (5,14) |
 | path A flow | `[1, 0, -1, 0, 1, 0, -1, 0, 1, 1]` (runs 1/3/5 with, runs 2/4 against, connectors still) |
 | spawn / core | (0,1) from (−1,1) / core (5,14) |
@@ -194,7 +198,7 @@ single path is an open question for the bot pass (§16).
 
 | field | value |
 |---|---|
-| id | `brain` · cols 10 · rows 15 · hpMult 1.0 · **unlockStars 6** |
+| id | `brain` · cols 10 · rows 15 · hpMult **0.8** · boss HP ×0.7 (`BOSS_HP_MULT`) · **unlockStars 6** |
 | path L | (1,0) (1,2) (3,2) (3,5) (1,5) (1,8) (3,8) (3,11) (1,11) (1,13) (4,13) (4,14) · 26 cells |
 | path R | (8,0) (8,2) (6,2) (6,5) (8,5) (8,8) (6,8) (6,11) (8,11) (8,13) (5,13) (5,14) · 26 cells |
 | flow (both) | `[1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1]` |
@@ -261,13 +265,13 @@ cost **80 / 60 / 100** · melee (instant) · no flying · default targeting `mar
 Engulf: when the cooldown is ready and not digesting, the macrophage swallows the *first* enemy in range whose current
 HP ≤ `threshold × g(wave) × (marked ? 1.5 : 1)`. The enemy dies instantly (reward granted, hero XP granted, **no spore
 split / no mutant division**). Cannot engulf: bosses, parasites, mutant cells, flying. While digesting it still bites.
-The wave-6 teaching spore (101 HP) is engulfable by a fresh L1 (55 × g(6) = 111).
+The wave-6 teaching spore (135 HP) is engulfable by a fresh L1 (55 × g(6) = 149).
 Enzymes (scales with the meal): on each engulf, acid splash radius 1.2 for **35 % of the engulfed enemy's maxHP**
 (armor-ignoring) and an acid pool (radius 1.0, 3 s, **10 % of that maxHP per second**, armor-ignoring) at the spot.
 
 ### 2.3 Mast Cell · 肥大细胞 (`mast`) — the swarm specialist (histamine splash)
 
-cost **95 / 70 / 115** · lobbed projectile 6 cells/s (arc height 1.2 cells) · no flying · default `first` · **full
+cost **100 / 80 / 130** · lobbed projectile 6 cells/s (arc height 1.2 cells) · no flying · default `first` · **full
 damage inside the splash radius, no falloff**
 
 | level | dmg | rate/s | range | splash r | extra | DPS |
@@ -276,7 +280,7 @@ damage inside the splash radius, no falloff**
 | 2 | **65** | 0.65 | 2.4 | **1.3** | — | 42.3 |
 | 3 | **100** | 0.7 | 2.6 | **1.5** | — | 70 |
 | 3 · **Allergy Storm 过敏风暴** (`allergyStorm`) | 100 | 0.7 | 2.6 | **1.9** | every hit slows 20 % for 1.5 s (counts toward the slow cap) | 70 |
-| 3 · **Histamine Burn 组胺灼烧** (`histamineBurn`) | 80 | 0.7 | 2.6 | 1.5 | burn: `16 × g(w)^0.5` DPS (w1 16 · w10 30 · w20 60) for 4 s, armor-ignoring, refreshed by the same tower, up to 3 burns from different towers stack | 56 + burn |
+| 3 · **Histamine Burn 组胺灼烧** (`histamineBurn`) | 80 | 0.7 | 2.6 | 1.5 | burn: `16 × g(w)^0.5` DPS (w1 16 · w10 39 · w20 106) for 4 s, armor-ignoring, refreshed by the same tower, up to 3 burns from different towers stack | 56 + burn |
 
 Group spacing inside a wave is ≈ 1.35 cells (0.8 s gap × 1.69 cells/s with flow), so a 1.3+ splash reliably catches
 two enemies and a 1.5 splash three. Against the Giant Parasite a splash hits up to 4 body zones (§5.9 m).
@@ -288,15 +292,16 @@ lingers 0.4 s after leaving
 
 | level | range | slow | aura DPS at w1 (armor-ignoring; applied `× g(w)^0.5`) | extra |
 |---|---|---|---|---|
-| 1 | 1.9 | 25 % | 4 (w10 7.5 · w20 15) | — |
-| 2 | 2.1 | 32 % | 7 (w10 13 · w20 26) | — |
-| 3 | 2.3 | 40 % | 11 (w10 21 · w20 41) | — |
+| 1 | 1.9 | 25 % | 4 (w10 9.8 · w20 26) | — |
+| 2 | 2.1 | 32 % | 7 (w10 17 · w20 46) | — |
+| 3 | 2.3 | 40 % | 11 (w10 27 · w20 73) | — |
 | 3 · **High Fever 高热** (`highFever`) | 2.3 | **55 %** | 14 | — |
 | 3 · **Low Fever 低烧** (`lowFever`) | **3.2** | 30 % | 9 | 0.5 s stun the first time each enemy enters this tower's aura |
 
 ### 2.5 Killer T-Cell · 杀伤T细胞 (`tcell`) — sniper
 
-cost **140 / 100 / 170** · instant tracer · hits flying · default `strongest`
+cost **160 / 120 / 190** · instant tracer · hits flying · default `strongest` (rev. 3: +20 / +20 / +20 so a T-cell-only
+build fails by wave 11–17 instead of clearing; §15.1)
 
 | level | dmg | rate/s | range | DPS |
 |---|---|---|---|---|
@@ -313,7 +318,7 @@ answer to every boss.
 
 ### 2.6 Complement Cascade · 补体级联 (`complement`) — chain hits
 
-cost **120 / 85 / 140** · instant chain · hits flying · default `first`
+cost **140 / 100 / 165** · instant chain · hits flying · default `first` (rev. 3: +20 / +15 / +25; §15.1)
 
 | level | dmg | rate/s | range | targets | jump range (marked→marked) | falloff per jump | DPS |
 |---|---|---|---|---|---|---|---|
@@ -351,15 +356,17 @@ range. Several Alarms count once.
 
 ### 2.8 Platelet Barrier · 血小板屏障 (`barrier`) — built on the path
 
-cost **35 / 30 / 50** · path cells only (§1) · max 3 alive · never infected · no attack · flying ignores it
+cost **25 / 25 / 40** · path cells only (§1) · max 3 alive · never infected · no attack · flying ignores it (rev. 3:
+cheaper and sturdier — at the steeper `g` a flat-HP barrier held too small a share of a group's HP and the rebuild
+cost made it a net loss; §15.1)
 
 | level | HP | regen (after 3 s without damage) | extra |
 |---|---|---|---|
-| 1 | 300 | 6 /s | — |
-| 2 | 550 | 10 /s | — |
-| 3 | 900 | 15 /s | — |
-| 3 · **Fibrin 纤维蛋白** (`fibrin`) | **1600** | 22 /s | — |
-| 3 · **Clot Spikes 凝血刺** (`clotSpikes`) | 900 | 15 /s | every attack-second on it reflects **4 % of the attacker's maxHP** (armor-ignoring); **2 % of maxHP per second** to every ground enemy within 0.6 cells (bosses ×0.25) |
+| 1 | **400** | 6 /s | — |
+| 2 | **800** | 10 /s | — |
+| 3 | **1300** | 15 /s | — |
+| 3 · **Fibrin 纤维蛋白** (`fibrin`) | **2200** | 22 /s | — |
+| 3 · **Clot Spikes 凝血刺** (`clotSpikes`) | **1300** | 15 /s | every attack-second on it reflects **4 % of the attacker's maxHP** (armor-ignoring); **2 % of maxHP per second** to every ground enemy within 0.6 cells (bosses ×0.25) |
 
 HP is multiplied by the talent `platelets` (+30 %). Upgrading restores the barrier to full HP. A ground enemy whose
 `dist` would pass `barrierDist − 0.45` stops there and attacks (§5.4). Bosses smash it: the barrier is destroyed on
@@ -387,16 +394,17 @@ Base values at wave 1 on normal. `HP(w) = round(base × g(w) × map.hpMult × di
 | `parasite` | 寄生虫 Parasite | parasitic | 320 | 0.75 | 2 | 18 | 2 | 25 | 0.30 | tank; **5 segments** 0.45 cells apart trailing the head along the path (segments are hit zones for the shared HP; a splash counts **once** per parasite, `splashZones 1`); in range of a tower when the head *or any segment* is; cannot be engulfed; slow resist 25 % |
 | `biofilm` | 生物膜 Biofilm | bacteria | 110 | 0.9 | 0 | 10 | 1 | 12 | 0.26 | regen 3 % maxHP/s; heals every other enemy within 1.2 cells 2 % of *its* maxHP/s (a target takes healing from at most one biofilm) |
 | `prion` | 朊病毒 Prion | viral | 60 | 1.4 | 3 | 9 | 1 | 10 | 0.20 | **stealth**: not targetable (and not a chain-jump target) unless inside a beacon's reveal radius or within the hero's reveal radius; splash / aura / acid that happen to cover it still damage it |
-| `toxin` | 毒素云 Toxin Cloud | other | 45 | 1.5 | 0 | 7 | 1 | 0 | 0.24 | **flying**: ignores barriers, flow, breathing push, aura slow/DoT, splash, acid, clot contact; hit only by antibody, complement, T-cell, hero, abilities; Fever slows it |
+| `toxin` | 毒素云 Toxin Cloud | other | 45 | 1.5 | 0 | 7 | **2** | 0 | 0.24 | **flying** (rev. 3: vit 2 — the counter to ground-only builds, §15.1): ignores barriers, flow, breathing push, aura slow/DoT, splash, acid, clot contact; hit only by antibody, complement, T-cell, hero, abilities; Fever slows it |
 | `mutant` | 癌变细胞 Mutant Cell | other | **400** | 0.7 | 4 | **60** | 3 | 30 | 0.34 | **not a boss** (§3.2); regen 1 %/s; **divides once** at ≤ 50 % HP into two `divided` halves (55 % of parent maxHP each, speed 0.9, radius 0.26, reward **25**, vit 2); effective HP 640; cannot be engulfed; slow resist 25 % |
 | `superbug` | 超级细菌 Superbug | bacteria | **600** | 0.55 | **8** | 150 | 5 | 60 | 0.45 | **boss** (§3.1), regen **1 %/s**, **capsule**: tracer ×0.5, chain ×1.5 |
 | `giantParasite` | 噬菌巨虫 Giant Parasite | parasitic | 1500 | 0.7 | 4 | 200 | 8 | 120 | 0.50 | **boss**, 8 segments 0.5 apart, `splashZones 4` (§3.1) |
-| `virusKing` | 变异病毒王 Mutant Virus King | viral | **1600** | 0.6 | 6 | 300 | 10 | 80 | 0.50 | **boss** (§3.1) |
+| `virusKing` | 变异病毒王 Mutant Virus King | viral | **1200** | 0.6 | 6 | 300 | 10 | 80 | 0.50 | **boss** (§3.1) |
 
 Bosses: slow resist 50 % (Virus King 60 %), immune to stun, engulf, execute and Booster-execute (Booster deals 8 % maxHP
 instead), infection-free (n/a); their `vit` damage is unaffected by anything. Reference HP (normal): Superbug w5
-**1 049** (hard 1 364), w15 **4 245**; Giant Parasite w10 **5 277**; Virus King w20 **22 771** (hard 29 602).
-Bacterium: w1 40 · w5 70 · w10 141 · w15 283 · w20 569. Mutant: w13 2 140 (halves 1 177) · w17 3 743 · w20 5 693.
+**1 329** (hard 1 662), w15 **9 709**; Giant Parasite w10 **8 981**; Virus King w20 **52 483** (hard 65 604; Brain
+×0.56 → 29 390). Bacterium: w1 40 · w5 89 · w10 239 · w15 647 · w20 1 749. Mutant: w13 4 349 (halves 2 392) · w17
+9 634 · w20 17 494.
 
 ### 3.1 Boss skills (timings from the boss's spawn; `firstAt`/`every`/`duration` ×0.8 on hard, mutation exempt)
 
@@ -491,7 +499,10 @@ range are immune. Cures: hero centre within `heroCureRadius` (0.6; talent 1.5) o
 event, and the tower gets **`immuneUntil = now + heroCureImmunity`** (3 s; talent 5 s) so a passing virus stream cannot
 undo the cure before the next step; beacon pulse (every `cureEvery` s, all towers in buff range, no immunity). Towers
 within 1.0 cell of the vessel are the only ones at risk: UI shows a biohazard glyph on pads in that zone when a virus
-wave is previewed.
+wave is previewed. Zone = `virusRiskPads(map)`: pads and villi within Chebyshev distance 1 of any cell a virus walks
+(every path cell plus the off-grid entry cell). The glyph (overlay badge at the pad's near rim) is shown in `build` /
+`countdown` while the next wave's preview has `virus`, on empty pads and on pads whose tower can still be infected (not
+a beacon, not inside an L3 beacon's immunity), and hidden during the wave.
 
 ### 5.4 Barriers and enemy attacks
 
@@ -550,7 +561,7 @@ stars; the talent text says so. Stored as the max per `(map, difficulty)`. `tota
 | o | Burrowed boss | untargetable, takes nothing, projectiles in flight expire (`done`), DoTs pause |
 | p | Tie-breaks | lowest enemy id everywhere (targeting, chain, polyvalent, engulf) |
 | q | Spawned flag | spores from a Superbug, their sporelings, shed viruses and mutant halves are `spawned` (T-cell ×2); scripted spores' sporelings too |
-| r | Hero death vs marks / reveal | a dead hero reveals nothing and marks nothing; respawn at the core centre with prev = cur |
+| r | Hero death vs marks / reveal | a dead hero reveals nothing and marks nothing; respawn at his post beside the core (§6, `MapInfo.heroX/heroY`) with prev = cur |
 | s | Sell while infected / digesting | allowed; refund unchanged |
 | t | Early call during a boss telegraph | not applicable (bosses only exist in `wave`); early call is only possible in `countdown` |
 
@@ -578,9 +589,14 @@ stars; the talent text says so. Stored as the max per `(map, difficulty)`. `tota
 - Cure: any infected tower whose centre is within `heroCureRadius` of the hero is cured instantly and gets
   `heroCureImmunity` seconds of infection immunity (§5.3).
 - Damage taken: §5.4 (×0.25 of enemy attack). Out of combat (3 s without damage) regen **8 % maxHP/s**. At 0 HP:
-  `heroDeath`, body fades, respawns at the core centre after 15 s (talent 8 s) with full HP (`heroRespawn`). Dead hero
+  `heroDeath`, body fades, respawns at his **post** after 15 s (talent 8 s) with full HP (`heroRespawn`). Dead hero
   reveals nothing.
-- Starts each run at the core, level 1, 0 XP. Hero level/XP are per run (not persistent).
+- Starts each run at his **post**, level 1, 0 XP. Hero level/XP are per run (not persistent). The post
+  (`heroPost`, `MapInfo.heroX/heroY`) is the centre of the plain terrain cell (no path, pad, villi or core) touching the
+  core (8-way) nearest the camera — largest row, then closest to the core's centre column, then the right-hand one:
+  Vessel (5.5, 12.5) · Alveoli (6.5, 12.5) · Gut (6.5, 14.5) · Brain (6.5, 14.5). At the core centre he was drawn inside
+  the core mesh (invisible on Brain's two-cell core; QA round 2). While dead the snapshot reports the post as his
+  position, so the respawn arc is drawn where he reappears.
 - Sanity: at w10 a bacterium does 3.4 DPS to him and at most 3–4 can touch him (≈ 12 DPS vs 180 HP); the Virus King does
   50 DPS, so boss-tanking lasts ~5 s — his boss job is marking, not tanking.
 
@@ -589,13 +605,16 @@ stars; the talent text says so. Stored as the max per `(map, difficulty)`. `tota
 | id | zh / en | effect | cooldown | notes |
 |---|---|---|---|---|
 | `fever` | 发热 Fever | every enemy −40 % speed (bosses −20 %) for 6 s | 30 s | separate multiplicative layer, bypasses the 0.65 tower-slow cap; affects flying |
-| `antibiotic` | 抗生素打击 Antibiotic Strike | aim a point on the map: after 0.4 s, radius 1.5, dmg **`60 × g(wave)`** (w1 60 · w5 105 · w10 211 · w15 425 · w20 854), armor-ignoring, hits flying & stealth; **×2 vs bacteria family, ×0.5 vs viral family** | 25 s | **drag-to-aim** (§11.2): pointerdown on the button enters `abilityTarget`, dragging onto the map moves a crosshair drawn 56 px above the fingertip with the blast ring and a live count of enemies inside, release casts; release back on the button or outside the map cancels; pan/zoom are disabled meanwhile. Fallback: tap the button, tap the map (same lifted crosshair), tap "确认 / Confirm" |
+| `antibiotic` | 抗生素打击 Antibiotic Strike | aim a point on the map: after 0.4 s, radius 1.5, dmg **`60 × g(wave)`** (w1 60 · w5 133 · w10 359 · w15 971 · w20 2 624), armor-ignoring, hits flying & stealth; **×2 vs bacteria family, ×0.5 vs viral and `other` (toxin clouds, mutant cells; rev. 3)** | 25 s | **drag-to-aim** (§11.2): pointerdown on the button enters `abilityTarget`, dragging onto the map moves a crosshair drawn 56 px above the fingertip with the blast ring and a live count of enemies inside, release casts; release back on the button or outside the map cancels — decided from the **raw finger point**, never
+the lifted crosshair (a finger on the button or anywhere on the bottom bar, off the stage, or a crosshair under the HUD
+= cancel; the hint then reads "release here cancels"); pan/zoom are disabled meanwhile. Fallback: tap the button, tap the map (same lifted crosshair), tap "确认 / Confirm" |
 | `adrenaline` | 肾上腺素 Adrenaline | all towers +60 % fire rate (aura DPS too) for 8 s | 40 s | multiplies with beacon buffs |
-| `booster` | 疫苗加强针 Booster | every marked non-boss enemy below 30 % HP dies instantly (`execute`); every marked boss takes 8 % maxHP (armor-ignoring) | 45 s | unlocked by the `booster` talent; hidden (not greyed) when locked |
+| `booster` | 疫苗加强针 Booster | every marked non-boss enemy below 30 % HP dies instantly (`execute`); every marked boss takes a flat 8 % maxHP (armor-ignoring; neither its mark nor a vaccine multiplies it) | 45 s | unlocked by the `booster` talent; hidden (not greyed) when locked |
 
 Cooldowns ×0.85 with the `cytokines` talent. The ability button's tooltip shows `abilityDamage(id, wave)`. Rules text
 explains the realism: antibiotics do nothing against viruses, fever slows pathogen replication. At w20 one strike kills
-three bacteria (569 HP each) or takes 4 % off a Superbug — useful all game, never a boss killer.
+three bacteria (1 749 HP each vs 2 × 2 624) — useful all game, never a boss killer; it no longer erases toxin clouds
+(×0.5 since rev. 3), so ground-only builds cannot lean on it against flyers.
 
 ---
 
@@ -642,7 +661,11 @@ loop(frameMs):  acc += min(frameMs, 250) / 1000 × speed
   an 8-step burst on return).
 - `webglcontextlost`: `preventDefault()`, `paused = true`, show the "重新加载 / Reload" overlay; the sim never steps
   under it. `webglcontextrestored` or tapping the overlay button → `renderer.rebuild()` (the renderer is fully
-  reconstructible from `map` + the next snapshot), then resume.
+  reconstructible from `map` + the next snapshot), then resume. While lost, `rebuild()` calls `restoreContext()` on the
+  `WEBGL_lose_context` extension cached when the context was created (`getExtension` returns null on a lost context,
+  so a lazy lookup — three's `forceContextRestore` — silently does nothing); when no `webglcontextrestored` arrives within
+  1.5 s (no extension, or the browser keeps the context dead) it replaces the canvas and the `WebGLRenderer` and
+  rebuilds every layer. The button is disabled for 2.5 s after a tap.
 - `destroy()` (the shell calls it *before* the `onDestroy` callbacks): stop RAF, write the run save when allowed,
   `renderer.destroy()`, remove listeners. `onDestroy` registrations are a safety net only.
 
@@ -658,7 +681,9 @@ Default intra-group gaps (s): bac 0.8 · fla 0.5 · enc 1.2 · vir 0.8 · spo 1.
 mut 3.0 · bosses 0. Boss waves: 5 / 10 / 15 / 20 on every map. The "teaches" column drives the tutorial toasts (§11.7).
 
 **Smoothness rule** (unit test, all maps): from wave 3 on, every non-boss wave's total *effective* HP (spores counted
-with their sporelings, mutants at 640 base) is ≤ 1.5 × the previous wave's total; boss waves may exceed it. A single
+with their sporelings, mutants at 640 base) is ≤ 1.3 × `g(w)/g(w−1)` × the previous wave's total (≤ 1.59× at the 1.22
+growth; rev. 2's "≤ 1.5×" was the same 1.3 composition step at 1.15); boss waves may exceed it. Measured max 1.29
+(Gut w18). A single
 mutant appears at most once per non-boss wave; the `mut×2` pairs of the first revision were a hidden second final boss
 and are gone.
 
@@ -779,7 +804,7 @@ Let `k = w − 20`, `i = k − 1` (0-based).
 | gut | bio, bac, enc, bio | bio, spo, fla, enc | vir, bio, tox, pri | par, mut, par, bio |
 | brain | pri, bac, vir, fla | pri, enc, tox, spo | vir, pri, bio, fla | mut, par, pri, mut |
 
-- Scaling: HP `g(w)` as defined; speed `min(1.3, 1 + 0.01 k)`; armor `+k` for everything; rewards use the normal
+- Scaling: HP `g(w)` as defined (×1.06 per endless wave); speed `min(1.3, 1 + 0.01 k)`; armor `+k` for everything; rewards use the normal
   formula; `vit` unchanged. Wave bonus formula unchanged.
 - Capacity: wave 50 can exceed `SNAPSHOT_CAPACITY.enemies` (160). Enemies and projectiles beyond capacity are simulated
   normally but not drawn (`count = min(n, capacity)`); the UI logs one `console.warn` per session in dev builds.
@@ -800,7 +825,7 @@ scripted waves expand to ≥ 1 enemy; boss waves 5/10/15/20 contain exactly the 
 |---|---|---|
 | vitality (max) | 20 | 15 |
 | start ATP | 220 | 180 |
-| enemy HP | ×1.0 | **×1.3** |
+| enemy HP | ×1.0 | **×1.25** (rev. 3; ×1.3 at the new `g` left 1 of 12 hard runs clearable for the best bot) |
 | enemy speed | ×1.0 | ×1.08 |
 | enemy armor | +0 | **+1** |
 | rewards (kills, wave bonus) | ×1.0 | ×0.85 |
@@ -827,8 +852,8 @@ never affects stars). Bot acceptance for hard: waves 18–20 time-to-kill ≤ 2 
 
 ### 9.3 Tower cost summary (build / L2 / L3 / total)
 
-antibody 60/45/80/185 · macrophage 80/60/100/240 · mast 95/70/115/280 · pyrogen 75/55/95/225 · tcell 140/100/170/410 ·
-complement 120/85/140/345 · beacon 90/65/110/265 · barrier 35/30/50/115.
+antibody 60/45/80/185 · macrophage 80/60/100/240 · mast 100/80/130/310 · pyrogen 75/55/95/225 · tcell 160/120/190/470 ·
+complement 140/100/165/405 · beacon 90/65/110/265 · barrier 25/25/40/90.
 
 ---
 
@@ -867,7 +892,8 @@ Big icon 🦠, title, one-line description; **organ carousel** (horizontal snap 
 name, star row `★★☆` for the selected difficulty, best endless wave, 1-line description, lock badge ("6 ★ to unlock")
 for Brain; **difficulty** segmented control (hard greyed with "clear on normal first" until unlocked); 「免疫记忆」
 button (opens the memory sheet: tabs *talents* / *vaccines*, available points, respec button with confirm);
-**Continue run** primary button when a valid run save exists for *any* map (card shows "wave N saved"), else **Play**.
+**Continue run** primary button when a valid run save exists for *any* map (card shows "next: wave N", N = the wave the
+run continues with = `state.wave + 1`; after clearing wave 20 and choosing endless that is 21), else **Play**.
 The renderer chunk is prefetched with an idle-time `import()` on the start screen; until it resolves the Play button
 shows a progress state (`loading` key) instead of stalling (§11.10). Quality selector (auto / high / low) lives in the
 rules sheet footer. Selected map/difficulty persist in `prefs`.
@@ -892,7 +918,11 @@ rules sheet footer. Selected map/difficulty persist in `prefs`.
   highlighted card's role line appears on one detail line under the strip. Opening it calls `renderer.centerOn(pad)`
   (clamped, 250 ms) so the pad sits in the visible strip above the sheet. **Tap a card → ghost model + range disc on the
   pad (`selection.previewType`) and the card turns into `建造 ✓ / Build ✓`; second tap builds.** Tap elsewhere closes
-  without buying. (No immediate build: with a 70 % sell every mis-tap would cost 30 %.)
+  without buying. (No immediate build: with a 70 % sell every mis-tap would cost 30 %.) At 390 px only ≈ 4.3 of the 7
+  cards fit, so the strip is a horizontal scroller: its cards are built **once** per opened pad and every later change
+  (preview, a blocked tap's reason, ATP crossing a cost mid-wave) updates them **in place** — rebuilding reset the
+  scroller to 0 and threw the swiped-to `Build ✓` card off-screen (QA round 2). A previewed card cut at an edge is
+  scrolled just fully into view toward that edge (`ui/scroll.ts`), so the spot just tapped stays on it.
 - **Tower panel** (tap a tower): docked at the bottom, camera auto-panned so the tower stays visible above it; compact
   two-row header (name / level pips / spec badge; `dmg · rate · range · DPS` computed by `towerStats` for the relevant
   wave), extras collapsed behind an ⓘ toggle, kills, upgrade button with cost (at L2 → L3 it opens the two
@@ -901,10 +931,20 @@ rules sheet footer. Selected map/difficulty persist in `prefs`.
   arm-then-confirm (v1 pattern), infection badge with remaining seconds, immunity shield glyph, barrier HP bar.
 - **Hero**: §6 (portrait is the canonical entry; tap-on-tower-in-move-mode = cure gesture).
 - **Floating text** on the 2D overlay (projected with `renderer.project`): damage numbers (≥ 10, throttled to 30 at
-  once), `+ATP`, `cured`, `engulfed`, `execute`, boss skill names at telegraph.
-- **Pause**: header ⏸ / ▶; overlay with resume, restart (confirm), rules, quality, home (writes run save when allowed).
+  once), `+ATP`, `cured`, `engulfed`, `execute`, boss skill names at telegraph. A tower's status labels (`infected!` /
+  `cured`) are keyed by tower id: one live label per tower, a new one replaces it in place and the same text is not
+  restarted within 1.2 s (mass infection with beacons curing every 1–2 s used to pile them into unreadable clusters).
+- **Pause**: header ⏸ / ▶; overlay with resume, restart (confirm), rules, quality, home (writes run save when allowed);
+  its buttons (and the start screen's secondary buttons) are ≥ 44 px tall (the shell's `btn-md` is 43 px).
+- **No WebGL**: the loading overlay says so and offers only **Home** (nothing to retry), and the run is discarded — no run
+  save is written, so the start screen never offers "Continue" on a device that cannot play.
 - Boss toasts at wave start (`bossIncoming`), vaccine unlock toast + card flash. Tutorial toasts: ≥ 6 s, tap to dismiss,
-  never shown while a boss toast is up.
+  never shown while a boss toast is up. Toasts dock at the **bottom** of the map strip, just above the bar and whatever
+  is docked on it (sheet / move-aim hint), so spawns, the first legs and the pads a tutorial talks about stay visible;
+  the card lets taps through to the map and only its 44 px ✕ dismisses it. The boss toast waits until the renderer's
+  wave banner is gone (`renderer.bannerShowing`, renderer clock — independent of game speed and frame rate).
+- Text ≥ 12 px everywhere in the game chrome and overlay labels; touch targets ≥ 44 px (sheet ✕ as a 44 px hit box
+  drawn 36 px, HUD wave button 44 px tall with no vertical HUD padding).
 
 ### 11.3 End of run
 
@@ -959,7 +999,10 @@ count regardless of quality.
 - **Camera**: perspective **FOV 30°, pitch 58°**, **yaw 8°** (more yaw rotates the footprint and shrinks far-row
   pads). Default framing: the row at the vertical centre of the viewport spans the **map width** (+0.5-cell margin per
   side) and the core-side 55 % of the map height (≈ 8 rows) is visible; vertical pan is allowed, pinch zoom 1×–2×, both
-  clamped so the map never leaves the viewport. `centerOn(x, y, fy)` pans (250 ms) so a world point lands at a screen
+  clamped so the map never leaves the viewport. Yaw and perspective make the near rows wider than the fitted centre row
+  (Gut (0,12) and Brain (0,13) were half off-screen), so the framing then widens until **every pad ring** (r 0.45) fits
+  the viewport width (3 px margin) and shifts horizontally to centre the pads; the horizontal clamp always admits that
+  pose (`setPads`). Measured at 390 × 664 / 760: pad rings span 4–386 px on Gut / Brain, far discs ≥ 42 px. `centerOn(x, y, fy)` pans (250 ms) so a world point lands at a screen
   fraction of the visible strip (used by the build strip and the tower panel).
   Why these angles: with 8 visible rows the far/near scale ratio of the strip is `(D + 4 cos 58°) / (D − 4 cos 58°)`
   = 1.40 (D = 12.7 cells for a 30° FOV); at 390 px a 10-column map gives 35.5 px/cell at the centre row and 25.4 at
@@ -968,12 +1011,25 @@ count regardless of quality.
   **Unit test** (pure camera maths, no WebGL): at 390 px width, zoom 1, default framing, the farthest *visible* pad
   row's pick disc projects to ≥ `CAMERA.minFarPadPx` (40) CSS px on every map — the 44 px touch target is met through
   the proxies, not the pad mesh. Adjacent pads (Alveoli (1,2)/(1,3), Brain (4,0)/(5,0)) overlap discs; the nearest
-  centre wins, so each keeps a ≥ 0.5-cell-wide exclusive zone.
+  centre wins, so each keeps a ≥ 0.5-cell-wide exclusive zone. `camera.test.ts` also asserts every pad ring is fully
+  on screen at 390 × 664, 390 × 760 and 820 × 1130.
 - **Picking** (`pick(sx, sy)`): raycast against invisible proxies, never the floor plane (under a 58° camera a floor hit
   on a tall tower lands half a cell behind it): a disc of radius 0.7 on every pad (at pad height), a capsule of radius
   0.45 and the level's `towerHeight` per built tower, a sphere of radius 0.5 around the hero, a flat quad per path
   cell, the floor last. Resolve by priority hero > tower > pad > path > terrain; when a pad wins, snap to the nearest
   pad centre within 0.75 cells. The UI routes the result (§11.2).
+  **Tower vs the path cell behind it** (`render/pick.ts`, `pick.test.ts`): each tower has a second, slimmer proxy — its
+  *body*: a capsule of the type's `BODY_PICK_RADIUS` (0.3 T-cell / beacon … 0.45 macrophage / barrier; thin lances and
+  emblems excluded) from the base to the model's **silhouette top** (body + floating spec emblem, ≈ 1.6 at L3). A body
+  hit always picks that tower (nearest body first, so a tower's body seen through another's capsule margin wins too).
+  A ray that only grazes a pick capsule picks the tower as well, unless at trench depth it lands in an *empty path cell*
+  other than the tower's own — under the 58° camera a tower's capsule overhangs the cell behind it, and the strips of
+  that cell visible beside / above the model belong to the cell (barrier strip). The cell's centre behind a tall tower
+  is *drawn behind the model*, so it picks the tower: round 1's "the inner ±0.32 of the path cell wins" opened the
+  barrier strip from the upper half of L3 towers on 9 of 11 Vessel row-2/5/8 pads (QA round 2). Measured at 390 × 664
+  (Vessel, zoom 1): every tap on the projected axis from 0.2 to the silhouette top (±0.15 beside it) picks the tower;
+  the path cell behind keeps 26–51 % of its screen area (240–630 px²) behind an L3 T-cell / beacon / Long Chain, 16–36 %
+  behind a Low Fever pyrogen, ≥ 55 % (its far half included) behind an L1 tower; pinch zoom (2×) quadruples those strips.
 - **Projection** (`project(x, y, h, out)`): returns false when off-screen; used for HP bars, floating text and the
   ability crosshair's enemy count.
 - **Events**: `handleEvents` receives the frame's drained array (§11.5). **State**: `render(snap)` draws only what the
@@ -998,7 +1054,20 @@ count regardless of quality.
 - Projectiles: one `InstancedMesh` per kind from the SoA buffer; floating text and HP bars on the 2D overlay.
 - Lighting: hemisphere + one directional; shadows only on high; pixel ratio ≤ 1.5 (2 on high) ; ACES, fog.
 - No per-frame allocation in `render`, `snapshot`, `step` or `takeEvents` (a test wraps a wave at ×2 and asserts the
-  heap delta is bounded).
+  heap delta is bounded). `perf.test.ts` (V8 `gc()`): 20 000 `snapshot` + `takeEvents` calls on a crowded wave-19
+  state grow the heap < 200 KB (one boxed double per call would be 320 KB — megamorphic double loads such as
+  `ENEMIES[e.type].slowResist` or `levelStats(...).range` box, so the snapshot reads them from flat typed tables), and a
+  whole wave at ×2 through the frame-loop contract retains < 1 MB. Events are objects by design (`emit`).
+- Terrain: the floor heightfield is fine (5 samples / cell) only over the map ±1.6–2 cells and ≈ 1 sample / cell in
+  the rest of the margin: Vessel idle 49.6k → 34.6k triangles (11 → 14 fps in SwiftShader at DPR 2 — an *empty* map).
+- SwiftShader (headless Chromium's CPU rasteriser) is **fill-bound** and not representative of a phone GPU; QA round 2
+  measured 4.7–5.2 fps for 20 L3 towers + ≈ 30 enemies at DPR 2 on high (JS < 0.1 ms / frame, 33–46 draw calls), the
+  auto probe dropping the canvas 780 → 585 → 390 px wide as specified. Per-layer cost of that scene (layer hidden, same
+  frame, rAF counted over 3 s; ±0.3 fps noise): the full-screen floor is the only large item (5.1 → 7.3 fps hidden;
+  an unlit floor material 4.3 → 5.6, so most of it is per-pixel Lambert lighting over ≈ 1 M px), shadows / flow particles
+  / towers / overlay canvas ≤ the noise each, an empty scene 20.5 fps (clear + compositing). DPR 2 → 1.5 ≈ +40 %. No
+  change made: a baked-lighting floor for the low tier is the next lever if a real mid-range phone misses 45 fps with
+  the auto tier (probe on hardware first).
 
 ### 11.10 Bundle and first load
 
@@ -1017,6 +1086,9 @@ new dependency.
 `events = []`, re-applies the current `ImmuneMemory` modifiers (so new talents count), validates `phase ∈ build |
 countdown`, every tower on a legal cell and `nextId` above every id; otherwise the save is dropped. Any `v ≠
 RUN_VERSION` is dropped (losing a mid-run save is cheap). `rng` is stored but currently unused (conventions).
+`stats.recorded` (what `recordRun` already added to the memory at the wave-20 clear, set by `noteRecorded`) travels with
+an endless run so a later game over — even after a reload — counts neither the run nor its cleared part twice; it is
+read leniently (absent → null, values clamped to the run's own counters).
 Determinism test: same seed + same scripted command list → identical `serialize()` output after 20 waves and after a
 save/load round trip at wave 10.
 
@@ -1050,20 +1122,21 @@ and `pointsAvailable` are derived, never stored.
 ## 13. Fun checklist (what the bots and the reviewer verify)
 
 1. Waves 1–6 on Vessel each introduce one mechanic (§8.1) and are clearable with ≤ 3 tower types.
-2. From wave 11 a single-type defense fails on every map: armor (enc, Superbug) breaks antibody spam; toxin clouds
+2. A single-type defense fails on every map (bot pass: waves 6–17, average 9.6–14.8, §15.1): armor (enc, Superbug) breaks antibody spam; toxin clouds
    break mast/pyrogen/macrophage spam; prions break everything without a beacon (chains no longer leak onto them);
    biofilm healing breaks low DPS. Re-run the single-type bot per tower type after every number change.
 3. Boss waves need a plan, and the plan differs per boss: Superbug wants complement (capsule ×1.5, regen suppression)
    + macrophage (spores); Giant Parasite wants mast (4 zones per splash) and slows before the charge, no barrier in
    its first 8 s; Virus King wants ≥ 3 damage types (mutation share) and beacons near the core. A T-cell-only boss plan
    is at most ~1.6× faster than a diversified one at equal spend (§15), never 3×.
-4. Hard: expect < 30 % clear rate for a competent bot that clears normal; waves 18–20 ≤ 2× normal's time-to-kill;
-   3 stars on hard Brain is the end goal.
+4. Hard: the hero-centric bot clears ~60 % of fresh hard runs with 1–2 ★ (Brain 0 %), every bot without the active
+   hero, marks and smart abilities clears ≤ 8 % (§15.1); waves 18–20 ≤ 2× normal's time-to-kill; 3 stars on hard Brain
+   is the end goal.
 5. The hero always has something to do: cure (virus waves, with immunity so it sticks), reveal (prion waves), mark
    bosses for the T-cells, finish marked stragglers near the core.
 6. Stars are earned, not healed: 3★ means ≤ 2 leaks all run on normal.
-7. Tuning knobs, in order of preference: `g` growth base (1.15), start ATP, boss base HP, tower L3 costs. Never tune
-   by changing wave *shapes*; keep the smoothness rule green.
+7. Tuning knobs, in order of preference: `g` growth base (1.22), start ATP, boss base HP, tower costs. Never tune
+   by changing wave *shapes*; keep the smoothness rule green. Re-run the §15.1 bot pass after every change.
 
 ---
 
@@ -1111,6 +1184,7 @@ defines (`rules` mandatory; this revision also needs `buildConfirm` 建造 ✓ /
 
 ## 15. Balance sanity check (Vessel · normal · the arithmetic behind the numbers)
 
+Revision-2 numbers (g = 1.15, old costs); kept for the method — §15.1 supersedes the conclusions.
 Method: pure arithmetic over this spec (script kept with the design notes, no game code). Time under fire per tower =
 ∫ over the path of `ds / v(s)` inside its range using §5.2 flow factors; "lone-enemy budget" = Σ tower DPS × that time
 (what one enemy walking alone would absorb); "filler window" = spawn span + 60 % of the walk. Boss DPS counts the
@@ -1154,6 +1228,206 @@ hold times, hero contribution, hard mode (×1.3 HP, armor +1, 8 s countdown) and
 
 ---
 
+### 15.1 Bot pass (revision 3) — the numbers in this spec were retuned against these runs
+
+**Method.** A headless harness (kept with the design notes, outside the repo; the cheap regression subset lives in
+`bot.test.ts`, whose in-repo `GreedyBot` (sim/bot.ts) now also takes the seed as described below, walks the hero to
+meet the most advanced unrevealed prion past 40 % of its path, and keeps building past its curve once every tower is
+maxed — single-type runs keep the fixed curve and the guard hero; it clears normal on all four maps for seeds 1–3
+(Brain 3★ / 2★ / 3★, Gut 3★ / 1★ / 3★), loses every fresh hard map (waves 5–18) and gets further with a veteran memory
+(Vessel cleared)) plays complete runs with scripted bots that use only the public commands (`build` / `upgrade` /
+`setTargeting` / `castAbility` / `moveHero` / `startWave`), on all 4 maps × normal / hard × 3 seeds. The simulation is
+deterministic, so the seed varies the bot: ±6 % noise on pad scores, a 0.20–0.35 s decision interval and ±1 tower on the
+build curve. Every run logs per wave: vitality, banked ATP, towers and Σ levels, leaks by enemy type, wave duration,
+each boss's outcome (killed / leaked, time to kill, fraction of its walk); mixed bots continue into endless until death.
+Hard is also run with a **veteran** memory (all 3 vaccines + 8 talent points: affinity, maturation, reserve,
+toughBlanc, sharpBlanc, platelets), which is what anyone who has unlocked hard (≥ 1 ★ on that map; Brain needs 6 ★)
+actually brings. Placement for every bot: the free pad with the most time-weighted, not-yet-covered path in range
+(later path counts more; beacons score buffed towers + reveal coverage; barriers go on the legal path cell covered by
+the most tower levels).
+
+| bot | what it does |
+|---|---|
+| `cheap` | cheapest damage towers (antibody → pyrogen → macrophage) round-robin on every pad, upgrades only when the pads are full, 3 L1 barriers, guard hero, basic abilities |
+| `only-<type>` (× 8) | one tower type only, 2 + 0.9 w towers, upgrades lowest level first, guard hero (cures the nearest infected tower, otherwise stands at 80 % of the busiest path), basic abilities (Fever / Adrenaline when ≥ 6 enemies or a boss is up, Antibiotic on the densest cluster of ≥ 3) |
+| `balanced` | adaptive mix (weights antibody 2 · mast 2 · complement 2 · T-cell 2 · macrophage 1 · pyrogen 1 · beacon 1, boosted from the next wave's preview: armor/tanks → T-cell, biofilm → complement, spores → mast, Superbug → complement, Giant Parasite → mast, Virus King → beacon; a beacon before stealth waves, anti-air before flying waves), **marks synergy** (antibodies on `strongest` once T-cells exist, Neutralizing / Polyvalent alternated), 2 + 0.85 w towers, 2 barriers (L2) from wave 4 rebuilt between waves, active hero, smart abilities |
+| `barrier` | balanced mix with extra mast / pyrogen weight, **3 barriers to L3** (Fibrin / Clot Spikes) from wave 2, guard hero, smart abilities |
+| `hero` | hero-centric: 2 + 0.7 w towers (fewer, more upgraded), antibody-heavy mix for marks, 1 barrier from wave 6, **active hero** (cures by tower value, reveals prions past 45 % of their path, stands 1.08 cells beside the path just ahead of a boss so he marks it without being touched, finishes the leading enemy near the core, retreats below 35 % HP), **smart abilities** (Fever when ≥ 3 enemies are in the last 35 % or the boss is past 40 %; Adrenaline on a boss or a crowd; Antibiotic weighted by family and progress) |
+| `nohero` | `balanced` with the hero parked in the far corner all run |
+| `plain` | the balanced weights without adaptation, marks or barriers; guard hero, basic abilities |
+
+**Results** (fresh memory; `3★(0)` = cleared with 3 stars and 0 vitality lost, `L12` = lost at wave 12):
+
+| bot | diff | vessel | alveoli | gut | brain | clear | mean ★ (cleared) | lost at (min–avg–max) | endless reached |
+|---|---|---|---|---|---|---|---|---|---|
+| cheap | normal | L15 1★(16) L20 | L20 L20 L14 | L20 L17 L20 | L19 L15 L11 | 1/12 | 1.00 | 11–17.4–20 | — |
+| cheap | hard | L10 L10 L10 | L11 L10 L10 | L10 L10 L10 | L5 L6 L5 | 0/12 | — | 5–8.9–11 | — |
+| only-antibody | normal | L15 L13 L13 | L15 L15 L15 | L12 L12 L15 | L10 L10 L10 | 0/12 | — | 10–12.9–15 | — |
+| only-antibody | hard | L10 L10 L10 | L12 L10 L10 | L10 L10 L10 | L5 L5 L5 | 0/12 | — | 5–8.9–12 | — |
+| only-macrophage | normal | L13 L10 L10 | L11 L10 L11 | L10 L12 L10 | L6 L6 L6 | 0/12 | — | 6–9.6–13 | — |
+| only-macrophage | hard | L9 L9 L9 | L6 L6 L6 | L8 L8 L8 | L5 L6 L6 | 0/12 | — | 5–7.2–9 | — |
+| only-mast | normal | L14 L14 L14 | L14 L14 L11 | L14 L14 L14 | L12 L12 L12 | 0/12 | — | 11–13.3–14 | — |
+| only-mast | hard | L9 L9 L9 | L11 L11 L11 | L8 L8 L8 | L6 L6 L6 | 0/12 | — | 6–8.5–11 | — |
+| only-pyrogen | normal | L14 L14 L17 | L14 L14 L14 | L8 L14 L8 | L12 L12 L12 | 0/12 | — | 8–12.8–17 | — |
+| only-pyrogen | hard | L9 L9 L9 | L6 L6 L6 | L8 L8 L8 | L4 L4 L4 | 0/12 | — | 4–6.8–9 | — |
+| only-tcell | normal | L15 L15 L15 | L15 L15 L15 | L17 L11 L15 | L15 L14 L15 | 0/12 | — | 11–14.8–17 | — |
+| only-tcell | hard | L10 L10 L5 | L10 L11 L11 | L10 L5 L5 | L5 L5 L6 | 0/12 | — | 5–7.8–11 | — |
+| only-complement | normal | L15 L15 L15 | L15 L15 L15 | L15 L15 L15 | L10 L10 L10 | 0/12 | — | 10–13.8–15 | — |
+| only-complement | hard | L12 L12 L12 | L11 L12 L11 | L5 L10 L10 | L5 L5 L5 | 0/12 | — | 5–9.2–12 | — |
+| only-beacon | normal | L4 L4 L3 | L4 L4 L4 | L5 L5 L5 | L3 L3 L3 | 0/12 | — | 3–3.9–5 | — |
+| only-beacon | hard | L2 L2 L2 | L2 L2 L2 | L4 L4 L4 | L2 L2 L2 | 0/12 | — | 2–2.5–4 | — |
+| only-barrier | normal | L8 L8 L8 | L5 L5 L5 | L5 L5 L5 | L5 L5 L5 | 0/12 | — | 5–5.8–8 | — |
+| only-barrier | hard | L5 L5 L5 | L5 L5 L5 | L5 L5 L5 | L5 L5 L4 | 0/12 | — | 4–4.9–5 | — |
+| balanced | normal | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(0) 3★(0) | 3★(2) 3★(0) 3★(0) | 12/12 | 3.00 | — | 32.1 (29–35) |
+| balanced | hard | 1★(14) L15 L20 | L15 L18 L20 | L18 L15 L15 | L6 L6 L9 | 1/12 | 1.00 | 6–14.3–20 | 28.0 (28–28) |
+| barrier | normal | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(1) 3★(0) | 3★(1) 1★(12) 1★(11) | 12/12 | 2.67 | — | 31.4 (28–35) |
+| barrier | hard | L15 1★(8) L15 | L15 L20 L15 | L12 L5 L10 | L9 L6 L8 | 1/12 | 1.00 | 5–11.8–20 | 28.0 (28–28) |
+| hero | normal | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(0) 3★(0) | 3★(2) 3★(0) 3★(2) | 12/12 | 3.00 | — | 30.8 (28–34) |
+| hero | hard | 3★(0) 1★(8) 1★(10) | 2★(2) 1★(10) 1★(12) | L11 1★(12) L15 | L6 L5 L10 | 7/12 | 1.43 | 5–9.4–15 | 26.0 (23–30) |
+| nohero | normal | 3★(1) 3★(0) 3★(0) | 3★(0) 3★(0) 3★(0) | 3★(0) 2★(10) 2★(10) | 1★(12) 2★(9) 1★(11) | 12/12 | 2.42 | — | 30.5 (25–35) |
+| nohero | hard | L10 L10 L20 | L14 L14 L14 | L5 L5 L5 | L4 L5 L5 | 0/12 | — | 4–9.3–20 | — |
+| plain | normal | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(0) 3★(0) | 3★(0) 3★(0) 2★(6) | 2★(8) 2★(7) 2★(5) | 12/12 | 2.67 | — | 30.3 (28–34) |
+| plain | hard | L15 L15 L20 | L15 L20 L20 | L15 L10 L10 | L10 L5 L10 | 0/12 | — | 5–13.8–20 | — |
+
+**Bosses** (mixed bots; fraction of the boss's path walked when it died, mean time to kill):
+
+| bot | diff | w5 Superbug | w10 Giant Parasite | w15 Superbug | w20 Virus King |
+|---|---|---|---|---|---|
+| balanced | normal | 12/12 killed @ 41 % of walk, 25 s | 12/12 killed @ 64 % of walk, 25 s | 12/12 killed @ 41 % of walk, 27 s | 12/12 killed @ 69 % of walk, 46 s |
+| balanced | hard | 12/12 killed @ 54 % of walk, 31 s | 8/9 killed @ 88 % of walk, 31 s | 6/9 killed @ 78 % of walk, 52 s | 0/3 killed |
+| barrier | normal | 12/12 killed @ 67 % of walk, 44 s | 12/12 killed @ 75 % of walk, 30 s | 12/12 killed @ 47 % of walk, 34 s | 12/12 killed @ 71 % of walk, 52 s |
+| barrier | hard | 8/12 killed @ 84 % of walk, 46 s | 6/8 killed @ 92 % of walk, 30 s | 2/6 killed @ 82 % of walk, 51 s | 1/2 killed @ 92 % of walk, 56 s |
+| hero | normal | 12/12 killed @ 43 % of walk, 26 s | 12/12 killed @ 65 % of walk, 25 s | 12/12 killed @ 36 % of walk, 23 s | 12/12 killed @ 75 % of walk, 46 s |
+| hero | hard | 11/12 killed @ 55 % of walk, 33 s | 7/10 killed @ 92 % of walk, 31 s | 8/8 killed @ 61 % of walk, 39 s | 3/7 killed @ 94 % of walk, 51 s |
+| nohero | normal | 12/12 killed @ 66 % of walk, 43 s | 12/12 killed @ 74 % of walk, 29 s | 12/12 killed @ 52 % of walk, 35 s | 10/12 killed @ 72 % of walk, 43 s |
+| nohero | hard | 5/11 killed @ 86 % of walk, 48 s | 2/6 killed @ 89 % of walk, 27 s | 1/1 killed @ 71 % of walk, 40 s | 0/1 killed |
+| plain | normal | 11/12 killed @ 64 % of walk, 39 s | 12/12 killed @ 72 % of walk, 27 s | 12/12 killed @ 47 % of walk, 31 s | 12/12 killed @ 77 % of walk, 50 s |
+| plain | hard | 9/12 killed @ 87 % of walk, 49 s | 6/11 killed @ 87 % of walk, 28 s | 3/7 killed @ 74 % of walk, 43 s | 0/3 killed |
+
+**Waves 1–3** (forgiveness):
+
+| bot | diff | leaks in waves 1–3 (avg per run) |
+|---|---|---|
+| cheap | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 2.3 |
+| cheap | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 2.7 |
+| only-antibody | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 1.7 |
+| only-antibody | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 3.7 |
+| only-macrophage | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 1.3 |
+| only-macrophage | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 1.0 |
+| only-mast | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 1.7 |
+| only-mast | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 1.7 |
+| only-pyrogen | normal | vessel 0.0 · alveoli 0.0 · gut 0.7 · brain 0.7 |
+| only-pyrogen | hard | vessel 0.0 · alveoli 0.0 · gut 1.0 · brain 12.0 |
+| only-tcell | normal | vessel 1.7 · alveoli 0.0 · gut 0.0 · brain 1.7 |
+| only-tcell | hard | vessel 4.7 · alveoli 0.3 · gut 0.0 · brain 4.3 |
+| only-complement | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 2.0 |
+| only-complement | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 4.3 |
+| only-beacon | normal | vessel 19.0 · alveoli 14.3 · gut 11.3 · brain 20.0 |
+| only-beacon | hard | vessel 15.0 · alveoli 15.0 · gut 14.0 · brain 15.0 |
+| only-barrier | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 3.3 |
+| only-barrier | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 5.7 |
+| balanced | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 0.0 |
+| balanced | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 0.7 |
+| barrier | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 1.0 |
+| barrier | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 1.3 |
+| hero | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 0.0 |
+| hero | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 0.7 |
+| nohero | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 2.0 |
+| nohero | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 4.0 |
+| plain | normal | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 2.0 |
+| plain | hard | vessel 0.0 · alveoli 0.0 · gut 0.0 · brain 2.0 |
+
+**Hard: veteran memory and what the good bot needs** (ablations of `hero` on fresh hard):
+
+| bot (hard) | memory | clear | mean ★ | vessel | alveoli | gut | brain |
+|---|---|---|---|---|---|---|---|
+| balanced | veteran | 6/12 | 2.33 | 3★ 2★ 2★ | 2★ 2★ L20 | L18 3★ L15 | L14 L16 L10 |
+| barrier | veteran | 6/12 | 2.50 | 3★ 3★ 2★ | L20 3★ 3★ | L15 1★ L20 | L12 L6 L12 |
+| hero | veteran | 10/12 | 2.40 | 3★ 3★ 3★ | 3★ 1★ 3★ | 2★ 3★ 2★ | 1★ L20 L16 |
+| hero | fresh | 7/12 | 1.43 | 3★ 1★ 1★ | 2★ 1★ 1★ | L11 1★ L15 | L6 L5 L10 |
+| nohero | veteran | 2/12 | 1.00 | 1★ L17 L20 | L20 1★ L20 | L20 L15 L15 | L5 L5 L5 |
+| plain | veteran | 6/12 | 2.67 | 3★ 3★ 3★ | 2★ 2★ 3★ | L20 L15 L15 | L10 L10 L20 |
+| hero+marks=false | fresh | 4/12 | 3.00 | 3★ 3★ 3★ | L15 3★ L15 | L11 L15 L15 | L6 L5 L16 |
+| hero+abilities=basic | fresh | 5/12 | 2.40 | 3★ 3★ 3★ | 1★ 2★ L20 | L15 L11 L15 | L6 L5 L6 |
+| hero+abilities=none | fresh | 0/12 | — | L15 L15 L14 | L14 L11 L11 | L10 L10 L11 | L5 L5 L5 |
+| hero+barriers=0 | fresh | 5/12 | 2.00 | 3★ 1★ 3★ | 2★ L14 L20 | L11 1★ L11 | L6 L5 L9 |
+| hero+hero=guard | fresh | 1/12 | 2.00 | 2★ L15 L20 | L15 L10 L14 | L10 L10 L5 | L5 L5 L5 |
+| hero+hero=none | fresh | 0/12 | — | L10 L15 L10 | L15 L20 L14 | L5 L5 L5 | L4 L5 L5 |
+
+**Per-wave trace** of the reference `hero` bot, seed 1 (vitality · ATP banked after the clear · non-barrier towers (Σ levels)):
+
+| wave | Vessel normal: vit · ATP · towers (Σlv) · boss | Vessel hard: vit · ATP · towers (Σlv) · boss | Gut normal: vit · ATP · towers (Σlv) · boss |
+|---|---|---|---|
+| 1 | 20 · 51 · 3 (3) | 15 · 78 · 2 (2) | 20 · 61 · 3 (3) |
+| 2 | 20 · 120 · 4 (4) | 15 · 49 · 4 (4) | 20 · 106 · 4 (4) |
+| 3 | 20 · 99 · 5 (5) | 15 · 169 · 4 (4) | 20 · 77 · 5 (5) |
+| 4 | 20 · 150 · 6 (6) | 15 · 194 · 5 (5) | 20 · 96 · 6 (6) |
+| 5 | 20 · 322 · 7 (7) SUP ✓ 36 % | 15 · 73 · 7 (8) SUP ✓ 61 % | 20 · 302 · 7 (7) SUP ✓ 48 % |
+| 6 | 20 · 100 · 7 (11) | 15 · 141 · 7 (9) | 20 · 164 · 7 (10) |
+| 7 | 20 · 172 · 8 (12) | 15 · 174 · 8 (10) | 20 · 202 · 8 (11) |
+| 8 | 20 · 120 · 9 (15) | 15 · 137 · 9 (12) | 20 · 98 · 9 (14) |
+| 9 | 20 · 218 · 9 (18) | 15 · 119 · 9 (15) | 20 · 139 · 9 (18) |
+| 10 | 20 · 477 · 10 (20) GPA ✓ 61 % | 15 · 317 · 10 (17) GPA ✓ 98 % | 20 · 439 · 10 (20) GPA ✓ 66 % |
+| 11 | 20 · 143 · 11 (25) | 15 · 230 · 11 (22) | 20 · 213 · 11 (24) |
+| 12 | 20 · 200 · 11 (27) | 15 · 140 · 11 (24) | 20 · 161 · 11 (27) |
+| 13 | 20 · 165 · 12 (30) | 15 · 143 · 12 (28) | 20 · 163 · 12 (31) |
+| 14 | 20 · 252 · 13 (33) | 15 · 177 · 13 (30) | 20 · 237 · 13 (33) |
+| 15 | 20 · 473 · 14 (36) SUP ✓ 41 % | 15 · 304 · 14 (33) SUP ✓ 61 % | 20 · 179 · 14 (39) SUP ✓ 49 % |
+| 16 | 20 · 191 · 15 (43) | 15 · 139 · 14 (36) | 20 · 196 · 15 (43) |
+| 17 | 20 · 182 · 17 (49) | 15 · 181 · 15 (43) | 20 · 202 · 17 (50) |
+| 18 | 20 · 325 · 18 (53) | 15 · 131 · 16 (47) | 20 · 234 · 18 (54) |
+| 19 | 20 · 181 · 21 (61) | 15 · 278 · 17 (51) | 20 · 179 · 20 (60) |
+| 20 | 20 · 765 · 23 (67) VKG ✓ 73 % | 15 · 594 · 20 (58) VKG ✓ 93 % | 20 · 710 · 23 (67) VKG ✓ 76 % |
+| endless | reached w30 | reached w25 | reached w34 |
+
+**Readings.**
+
+- *Normal is clearable with 2–3 ★ by a thoughtful mix*: `balanced` and `hero` clear 12/12 at 3 ★; `plain` (no adaptation,
+  marks or barriers) and `barrier` 12/12 at 2.67 ★; `nohero` 12/12 at 2.42 ★. The economy binds: the reference bot banks
+  100–300 ATP after most waves and reaches 20–23 towers / ~65 levels by wave 20 (25–32 pads).
+- *No single type carries*: every single damage type loses on every map (antibody 10–15, macrophage 6–13, mast 11–14,
+  pyrogen 8–17, T-cell 11–17, complement 10–15; average 9.6–14.8). Each dies to its designed counter: armor
+  (antibody), toxin clouds (mast / pyrogen / macrophage — 2 vit each, Antibiotic only ×0.5), prions and fast swarms
+  (T-cell), armor + stealth + bosses (complement). The two support types die at waves 3–8 by design. Brain's earlier
+  failures (w6–15) come from its stealth-heavy scripts, which is that map's lesson.
+- *Cheap spam fails* (1/12 clears at 1 ★, losses at 11–20): L1 spam has no answer to waves 10–19.
+- *Hard requires marks, barriers, the hero and the abilities*: on fresh hard only the hero-centric bot clears regularly
+  (7/12, 1.43 ★: Vessel 1.7, Alveoli 1.3, Gut 1.0, Brain 0); removing marks (4/12), smart abilities (5/12; none: 0/12),
+  its barrier (5/12) or the active hero (guard 1/12, parked 0/12) all cost clears; `plain` and `nohero` never clear. With
+  a veteran memory the hero bot clears 10/12 at 2.4 ★ and `nohero` 2/12 — 3 ★ on hard Brain stays the end goal.
+- *Bosses are decisive, not walls*: on normal the good bots kill the w5 Superbug at ~40 % of its walk, the Giant Parasite
+  at ~65 %, the w15 Superbug at ~40 % and the Virus King at 70–75 % (46 s); weaker builds take them at 65–90 %. On hard
+  the Giant Parasite and Virus King are killed at 88–94 % or leak — that is where hard runs are won or lost.
+- *The first 3 waves are forgiving*: no mixed bot leaks on Vessel / Alveoli / Gut in waves 1–3, and the single-type bots
+  only leak there when their first tower cannot cover the path (T-cell-only on Vessel, first tower 160 ATP: 1.7 per
+  run; pyrogen-only on Gut: 0.7); Brain wave 2 brings 4 prions, so builds with neither a beacon nor
+  the active hero leak 1–2 there.
+- *Endless*: every mixed build fills every pad at L3 by waves 21–23 and then banks ATP it cannot spend; strong builds
+  reach waves 28–35 (mean 30–32 on normal, 26–28 on hard), ending on the 2-vit toxin groups (`second ×(6 + k)`), the
+  w30 Giant Parasite or the w35 Virus King + Superbug pair. Endless growth 1.04–1.08 all land in 28–35 because the
+  composition (+k enemies, +k armor) dominates; 1.06 keeps HP growth meaningful.
+
+**Revision 3 changes** (old → new, why):
+
+| what | old → new | why (evidence above) |
+|---|---|---|
+| `g(w)` growth ≤ 20 | 1.15 → **1.22** | at 1.15 every mixed bot (even `plain`) went 3 ★ with 0 leaks and first leaked in endless w30–35 (~4–5× headroom at w19); T-cell-only cleared 3 maps, complement-only 2, mast-only Gut. 1.22 moves the economy check to waves 10–19 and changes waves 1–3 by +22 % / +13 % only |
+| endless growth | 1.12 → **1.06** | g(20) is 3.1× larger now; at 1.12 strong builds stopped at 28–30, at 1.06 they reach 28–35 |
+| Virus King base HP | 1 600 → **1 200** | at 1.22 the final boss leaked for every bot on Gut / Brain (a wall); at 1 200 the good bots kill it at 70–75 % of its walk on normal |
+| toxin `vit` | 1 → **2** | the flying counter was too weak: mast / pyrogen / macrophage-only reached w18–20 because the hero and Antibiotic cleaned up 1-vit toxins |
+| Antibiotic vs `other` | ×1 → **×0.5** | it one-shot toxin clusters, which let ground-only builds ignore flyers (mast-only still cleared Gut); also matches the rule text (antibiotics only kill bacteria) |
+| T-cell cost | 140/100/170 → **160/120/190** | T-cell-only lost at w15–19 with 0–7 vit lost on 3 maps (range nerfs did not help); now loses at 11–17 |
+| complement cost | 120/85/140 → **140/100/165** | complement-only lost at w16–19; now 10–15 (damage nerfs did not move it — economy binds) |
+| mast cost | 95/70/115 → **100/80/130** | mast is the most cost-efficient tower vs ground; together with toxin vit 2 mast-only now loses at 11–14 |
+| barrier cost / HP | 35/30/50, 300/550/900 (Fibrin 1 600, Spikes 900) → **25/25/40, 400/800/1300 (2 200, 1 300)** | at the steeper `g` barriers were a net loss (the balanced bot did better with none on hard; rebuild cost ~65 ATP per break); now the barrier-heavy bot clears 12/12 normal and barriers add clears on hard |
+| Gut `hpMult` | 1.2 → **1.0** | Gut's sparse pads already cost coverage; at 1.2 every boss on Gut leaked at the new growth |
+| Brain `hpMult` / boss HP | 1.0 → **0.8**, new `BOSS_HP_MULT.brain` **0.7** | two separate 26-cell paths split the defense; bosses walk one of them, so the w10 Giant Parasite and the Virus King were walls on Brain |
+| hard enemy HP | ×1.3 → **×1.25** | at ×1.3 the best bot cleared 1/12 fresh hard runs; at ×1.25 7/12 with 1.43 ★ |
+| smoothness rule | ratio ≤ 1.5 → **≤ 1.3 × g(w)/g(w−1)** | same 1.3 composition step as before; the raw ratio grows with `g` (max 1.29 composition, Gut w18) |
+| unchanged after testing | prion armor 3 (2 made no difference), hard burrow distance 4.5 (3.5 made no difference), T-cell range, mast damage, complement damage, boss skill timings | the sweeps showed these were not the binding constraint |
+
+---
+
 ## 16. Review resolution log (revision 2)
 
 | finding | resolution |
@@ -1173,3 +1447,34 @@ hold times, hero contribution, hard mode (×1.3 HP, armor +1, 8 s countdown) and
 | Draw-call budget, pause/visibility/context loss (major) | §11.9, §7.10 |
 | Event delivery, interpolation, RNG, snapshot gaps, HUD/text load, bundle, battery, duplicate truth (minor) | §11.5 double buffer; discontinuity rule + test; rng reserved + grep test; `towers` capacity 40, `Tower.lastShotAt`, `Projectile.t/arcHeight`, overflow rule; HUD cap 4 + chip, glyphs in the wave button, toasts ≥ 6 s; named three imports + prefetch; idle 30 fps + wave-5 probe; memory single source of truth |
 | Brain centre pads (minor) | left as designed; open question for the bot pass (does Brain play as one path?) |
+
+## 17. QA round 1 resolution log
+
+| finding | resolution |
+|---|---|
+| CSS custom properties dropped (spec badge unreadable, tower / spec colours lost) | `cssVars()` sets them with `style.setProperty` (the shell's `el()` copies styles with `Object.assign`); the badge ink is chosen per spec colour (≥ 4.5:1, unit test), light theme darkens pale spec borders / emblems |
+| Context-loss Reload did nothing | §7.10: cached `WEBGL_lose_context`, canvas + renderer replaced when no restore arrives within 1.5 s |
+| Antibiotic cast when released on its button | §6.1: cancel decided from the raw finger point (`ui/aim.ts`, unit-tested) |
+| Booster > 8 % vs marked bosses | §6.1: flat 8 % maxHP (`dealDamage(..., flat)`), unit test with strong mark + vaccine |
+| Biohazard glyph missing | §5.3 `virusRiskPads` + overlay badges |
+| Edge pads off-screen | §11.8 pad-aware framing + `camera.test.ts` |
+| Path cell behind a tower unpickable | §11.8 picking exception |
+| Pinch → one-finger pan | `GestureInput.release` clears `multi` (unit test with synthetic pointers) |
+| Toasts cover the top rows / boss toast over the banner | §11.2 bottom-docked tap-through toasts, banner-driven boss toast |
+| Endless save label and double-counted stats | §11.1 next-wave label; `RunStats.recorded` (serialized) + `noteRecorded`, `recordRun` subtracts it |
+| Per-frame UI allocations | wave preview cached per (map, wave); HUD / ability / portrait updates compare numbers before formatting; note timers tracked in a set |
+| Text < 12 px, targets < 44 px, rules too long, English aria-labels | §11.2 sizes; rules 8 lines with the missing mechanics (strings test); `speedLabel` / `infoLabel` keys |
+| Test gaps | seeded bot, Brain / hard / veteran guards, camera and heap tests (§11.8, §11.9, §15.1) |
+
+
+## 18. QA round 2 resolution log
+
+| finding | resolution |
+|---|---|
+| Build strip scroll reset on preview / ATP change / blocked tap (major) | §11.2: cards built once per pad and updated in place (`updateBuildStrip`), previewed card revealed toward its cut edge (`ui/scroll.ts`); `strip.test.ts` (jsdom, fake renderer) keeps the scroller, its cards and scrollLeft 230 across preview, ATP 0 / +500 and a blocked barrier tap, then builds on the second tap |
+| Upper half of tall towers opened the barrier strip (major, round-1 regression) | §11.8: body proxy (silhouette top, `BODY_PICK_RADIUS`) always wins; only capsule-margin rays reaching an empty path cell pick it; `pick.test.ts` (real camera + models): axis 0.2 → top on all 11 QA pads and every type / level / spec picks the tower, the cell behind keeps ≥ 10 % of its area (≥ 55 % behind L1), an occupied cell never wins |
+| SwiftShader < 30 fps (minor) | measured per layer, documented in §11.9; no change (floor lighting is the only large item, GPU-cheap) |
+| Pause overlay buttons 43 px (minor) | `.td-pause / .td-loading / .td-lost .btn` and the start screen's secondary buttons `min-height: 44px` |
+| No-WebGL "Retry" went home, save written (minor) | §11.2: Home only, run discarded (no save on leave / pagehide); `strip.test.ts` |
+| Blanc hidden inside the Brain core (minor) | §6: hero post beside the core (`heroPost`), respawn arc drawn there; `hero.test.ts` checks the four posts |
+| Status labels stacked (minor) | §11.2: `infected!` / `cured` keyed per tower (one live label, 1.2 s repeat guard); `strip.test.ts` |

@@ -223,7 +223,10 @@ export const CAMERA = {
 export const RENDER_BUDGET = {
   maxDrawCalls: 150,
   maxPixelRatioHigh: 2,
-  maxPixelRatioLow: 1,
+  /** Pixel-ratio cap on low quality (brief: "capped at 1.5, 2 on high"). */
+  maxPixelRatioLow: 1.5,
+  /** Last resort: auto quality drops to this pixel ratio when the probe is still under `probeMinFps` on low. */
+  degradedPixelRatio: 1,
   probeSeconds: 2,
   probeMinFps: 45,
   flowParticlesHigh: 1200,
@@ -709,6 +712,19 @@ export interface Tower {
   pathDist: number[];
 }
 
+/** Enzymes acid pool on the floor (§2.2): armor-ignoring DoT on ground enemies inside `radius` until `until`. */
+export interface AcidPool {
+  id: number;
+  /** Source macrophage tower id. */
+  src: number;
+  x: number;
+  y: number;
+  radius: number;
+  /** Damage per second (already a fraction of the engulfed enemy's maxHP). */
+  dps: number;
+  until: number;
+}
+
 export interface Projectile {
   id: number;
   src: number;
@@ -808,6 +824,22 @@ export interface RunStats {
   playtime: number;
   /** Damage dealt per tower type (end-of-run stats). */
   dmgByTowerType: Record<TowerId, number>;
+  /** Boss types killed this run, in first-kill order (`vaccineUnlocked` fires once per type; `recordRun` safety net). */
+  bossTypesKilled: BossId[];
+  /**
+   * What `recordRun` already added to the memory at the wave-20 clear (`noteRecorded`). Continuing into endless keeps
+   * the same run, so the final `recordRun` (game over, possibly after a save / reload) adds only what happened since
+   * and does not count a second run. null until the clear is recorded; serialized with the run save.
+   */
+  recorded: RecordedRunStats | null;
+}
+
+/** Cumulative counters of a run at the moment they were recorded into `ImmuneMemory.stats`. */
+export interface RecordedRunStats {
+  kills: number;
+  bossKills: number;
+  wavesCleared: number;
+  playtime: number;
 }
 
 /** Everything the persistent memory changes about a run, resolved once at createGame / load (§10). */
@@ -867,6 +899,8 @@ export interface GameState {
   waveState: WaveState;
   stats: RunStats;
   memory: MemoryModifiers;
+  /** Enzymes acid pools (§2.2); expired pools are removed every step. */
+  pools: AcidPool[];
   /** Pending events for VFX / sound / UI; drained by `takeEvents` (not serialized). */
   events: GameEvent[];
   nextId: number;
@@ -944,7 +978,10 @@ export type DeniedReason =
   | 'cooldown'
   | 'locked'
   | 'heroDead'
-  | 'needTarget';
+  /** A targeted ability was cast without a target point. */
+  | 'needTarget'
+  /** L2 → L3 upgrade without one of TOWER_SPECS[type] (the UI opens the specialization cards instead). */
+  | 'needSpec';
 
 /**
  * Discontinuity events: in a step that emits one of `spawn`, `split`, `flowReverse`, `bossSkill` (burrow, 'end'),
@@ -955,7 +992,8 @@ export type GameEvent =
   | { type: 'spawn'; id: number; enemy: EnemyId; pathIndex: number; x: number; y: number }
   | { type: 'shoot'; tower: number; kind: TowerId; x: number; y: number; angle: number }
   | { type: 'tracer'; tower: number; x1: number; y1: number; x2: number; y2: number }
-  | { type: 'chain'; tower: number; points: Point[] }
+  /** `points[0]` is the tower; `ids[k]` is the enemy at `points[k]` (−1 for the tower origin). */
+  | { type: 'chain'; tower: number; points: Point[]; ids: number[] }
   | { type: 'hit'; kind: TowerId | 'hero' | 'ability'; enemy: number; x: number; y: number; dmg: number; crit: boolean }
   | { type: 'splash'; kind: TowerId | 'ability'; x: number; y: number; radius: number; hits: number }
   | { type: 'pulse'; tower: number; x: number; y: number; range: number; hits: number }
@@ -1055,6 +1093,8 @@ export const EnemyViewFlag = {
   Burning: 1024,
   Marked: 2048,
   Divided: 4096,
+  /** Neutralizing (strong) mark: +35 % flat instead of +10 % per stack (mark pips are drawn differently). */
+  StrongMark: 8192,
 } as const;
 
 /** One preallocated object per slot (SNAPSHOT_CAPACITY.towers); `snapshot` rewrites fields in place. */
@@ -1096,6 +1136,7 @@ export interface ProjectileViewBuffer {
 }
 
 export interface HeroView {
+  /** Interpolated position; while dead, the respawn point (his post beside the core, §6). */
   x: number;
   y: number;
   angle: number;
@@ -1152,9 +1193,12 @@ export interface RenderSnapshot {
 // ── Renderer contract (§11.8) ───────────────────────────────────────────────
 
 export interface RendererOptions {
-  quality: RenderQuality;
+  /** 'auto' starts high and drops to low when the frame-time probe (waves 1 and 5) is under 45 fps (§11.6). */
+  quality: Quality | RenderQuality;
   theme: ThemeName;
   lang: Lang;
+  /** ctx.t: the renderer's own keys (`fx_*`) and the display names (`tower_*`, `enemy_*`, `skill_*`) resolve through it. */
+  t?: (key: string, params?: Record<string, string | number>) => string;
   /** Context lost (true) / restored (false). The UI pauses the sim and shows the reload overlay (§7.10). */
   onContextLost?: (lost: boolean) => void;
 }
@@ -1170,6 +1214,27 @@ export type PickResult =
   | { kind: 'path'; col: number; row: number }
   | { kind: 'terrain'; x: number; y: number }
   | null;
+
+/**
+ * A tap from the renderer's built-in gestures (8 px slop), resolved hero > tower > enemy > pad > path > terrain.
+ * `pick` is the enemy-free contract version; the UI routes taps through `onTap`.
+ */
+export interface TapHit {
+  kind: 'hero' | 'tower' | 'enemy' | 'pad' | 'path' | 'terrain';
+  /** Tower id or enemy id; −1 otherwise. */
+  id: number;
+  /** Grid cell (snapped pad cell for pads; the cell under the hit otherwise); −1 outside the grid. */
+  col: number;
+  row: number;
+  /** Logic point on the floor under the tap (pad centre for pads). */
+  x: number;
+  y: number;
+  /** Screen point (CSS px, container-relative). */
+  sx: number;
+  sy: number;
+  /** True when (col, row) is a vessel cell — lets the UI treat an enemy tap as a path tap (barrier building). */
+  pathCell: boolean;
+}
 
 /** Per-frame renderer counters for the smoke test (§11.9). */
 export interface RenderStats {
@@ -1200,12 +1265,42 @@ export interface ImmuneRenderer {
   fitMap(): void;
   /** Animated clamped pan so world (x, y) lands at vertical screen fraction `fy` (default 0.45) of the visible strip. */
   centerOn(x: number, y: number, fy?: number): void;
-  setQuality(q: RenderQuality): void;
+  /** 'auto' starts high and probes frame time (§11.6); 'high' / 'low' force it. */
+  setQuality(q: Quality | RenderQuality): void;
   setTheme(t: ThemeName): void;
   /** Disposes and recreates every GPU resource (context restore, "重新加载"). */
   rebuild(): void;
   stats(): RenderStats;
   destroy(): void;
+
+  // ── Integration surface the DOM UI uses (§7.10, §11.2) ──
+  /** Same as `handleEvents` + `render`, with the real frame time in seconds (VFX timing); `alpha` is informational. */
+  update(snap: RenderSnapshot, alpha?: number, dt?: number): void;
+  /** Built-in tap gestures; returns an unsubscribe function. */
+  onTap(cb: (hit: TapHit) => void): () => void;
+  /** Screen point (CSS px) → floor point in logic cells; false when the ray misses the floor. */
+  floorPoint(sx: number, sy: number, out: Point): boolean;
+  /**
+   * CSS px covered by UI chrome on top / bottom; framing, clamping and `centerOn` use the strip between them.
+   * `refit` (default true) re-applies the default framing; false keeps the camera and eases it back inside the clamp.
+   */
+  setInsets(top: number, bottom: number, refit?: boolean): void;
+  /** Pulsing highlights on pads / path cells (build strip); null clears. */
+  showBuildable(cells: readonly (readonly [number, number])[] | null): void;
+  /** Pads that a previewed virus wave can infect (§5.3): drawn with a biohazard glyph; null clears. */
+  showRisk(cells: readonly (readonly [number, number])[] | null): void;
+  /** Range disc of the build-ghost preview (null = the type's built-in L1 range). */
+  setGhostRange(r: number | null): void;
+  /** Idle frames (build / countdown, nothing moving) use the low flow-particle count (§11.6). */
+  setIdle(idle: boolean): void;
+  /** True while the wave-start banner is on screen (the UI holds the boss toast until it is gone). */
+  readonly bannerShowing: boolean;
+  /** Freezes VFX / idle animation while the game is paused (camera gestures still redraw). */
+  pause(): void;
+  resume(): void;
+  setLanguage(lang: Lang, t?: (key: string, params?: Record<string, string | number>) => string): void;
+  /** VFX still settling (the UI keeps full frame rate until they finish). */
+  readonly busy: boolean;
 }
 
 /** renderer.ts default export; the UI lazy-loads it (`import('./renderer')`) and prefetches on the start screen. */
@@ -1291,12 +1386,12 @@ export interface ImmuneLogic {
    */
   snapshot(s: GameState, out: RenderSnapshot, alpha: number): void;
   /** Allocates a snapshot buffer (SNAPSHOT_CAPACITY unless overridden). */
-  createSnapshot(map: MapDef, capacity?: Partial<typeof SNAPSHOT_CAPACITY>): RenderSnapshot;
+  createSnapshot(map: MapDef, capacity?: Partial<Record<keyof typeof SNAPSHOT_CAPACITY, number>>): RenderSnapshot;
 
   // Building
   canBuild(s: GameState, col: number, row: number, type: TowerId): BuildCheck;
   build(s: GameState, col: number, row: number, type: TowerId): Tower | null;
-  /** L1→L2 needs no spec; L2→L3 requires `spec` to be one of TOWER_SPECS[type]. */
+  /** L1→L2 needs no spec; L2→L3 requires `spec` to be one of TOWER_SPECS[type] (denied with 'needSpec' otherwise). */
   upgrade(s: GameState, towerId: number, spec?: SpecId): boolean;
   /** Refund actually granted (0 when nothing was sold). */
   sell(s: GameState, towerId: number): number;
@@ -1352,6 +1447,8 @@ export interface ImmuneLogic {
   grantVaccine(memory: ImmuneMemory, boss: BossId, at: number): ImmuneMemory;
   /** Applies run results (stars, best endless, stats) to the memory; pure. `newStars`/`newEndless` compare against the input. */
   recordRun(memory: ImmuneMemory, s: GameState): RecordRunResult;
+  /** Remembers in the run that `recordRun` has counted it so far (call after recording the wave-20 clear). */
+  noteRecorded(s: GameState): void;
   isMapUnlocked(memory: ImmuneMemory, id: MapId): boolean;
   isHardUnlocked(memory: ImmuneMemory, id: MapId): boolean;
   /** Stars from `stats.vitLost` (§5.8), 0 unless wave 20 is cleared. */
